@@ -84,9 +84,9 @@ def python_result(data: AppData, today: date) -> dict:
 
 def run_node(tmp_path, scenarios):
     path = tmp_path / "scenarios.json"
-    path.write_text(json.dumps(scenarios))
+    path.write_text(json.dumps(scenarios), encoding="utf-8")
     out = subprocess.run(["node", str(ROOT / "tests" / "web_runner.mjs"), str(path)],
-                         capture_output=True, text=True, timeout=600)
+                         capture_output=True, text=True, encoding="utf-8", timeout=600)
     assert out.returncode == 0, out.stderr
     return json.loads(out.stdout)
 
