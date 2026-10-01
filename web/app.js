@@ -424,15 +424,25 @@ function viewMore() {
 
 // ------------------------------------------------------------------ sheets
 const sheet = () => $("#sheet");
-function openSheet(title, body, onMount) {
+function openSheet(title, body, onMount, kind = "") {
   const s = sheet();
+  s.dataset.kind = kind;
   s.innerHTML = `<div class="grab"></div><header><h3>${esc(title)}</h3><button class="x" data-act="close" aria-label="Close">✕</button></header><div class="body">${body}</div>`;
   if (!s.open) s.showModal();
   s.querySelector(".body").scrollTop = 0;
   onMount?.(s);
 }
 function closeSheet() { if (sheet().open) sheet().close(); }
-sheet().addEventListener("click", (e) => { if (e.target === sheet()) closeSheet(); });
+// The daily check-in prompt only counts as "done for today" once it's saved or the user
+// deliberately closes it (✕, tap outside, swipe/Esc) — not when the app locks or reloads.
+function markPrompted() { meta.lastPrompt = E.toISO(today); persist(); }
+function userClose() {
+  if (sheet().open && sheet().dataset.kind === "checkin") markPrompted();
+  closeSheet();
+}
+sheet().addEventListener("click", (e) => { if (e.target === sheet()) userClose(); });
+sheet().addEventListener("cancel", () => { if (sheet().dataset.kind === "checkin") markPrompted(); });
+let checkinDraft = null; // what was typed into the check-in when the app locked
 const field = (label, input, cls = "") => `<div class="field ${cls}"><label>${label}</label>${input}</div>`;
 const toggle = (label, id, on) => `<div class="field toggle-row"><label for="${id}">${label}</label><label class="switch"><input type="checkbox" id="${id}" ${on ? "checked" : ""}><span></span></label></div>`;
 const opts = (obj, sel) => Object.entries(obj).map(([k, v]) => `<option value="${esc(k)}" ${k === sel ? "selected" : ""}>${esc(v)}</option>`).join("");
@@ -440,7 +450,7 @@ const val = (id) => $("#" + id, sheet())?.value ?? "";
 const checked = (id) => !!$("#" + id, sheet())?.checked;
 
 // ---------- check-in
-function sheetCheckin() {
+function sheetCheckin(draft = null) {
   const start = E.startCheckpoint(data);
   if (!start) return sheetStart();
   const body = `<p class="hint" style="padding-top:0">What does your bank app show right now? Any difference from the plan is logged as unplanned spending (or income).</p>
@@ -472,8 +482,14 @@ function sheetCheckin() {
         : diff > 0 ? `<div class="big pos">${money(diff)} more than planned</div>` : `<div class="big pos">Right on plan ✓</div>`);
     };
     s.querySelectorAll("#ci_date,#ci_bal,#ci_inc").forEach((el) => el.addEventListener("input", () => upd(false)));
-    upd(true);
-  });
+    if (draft) {
+      $("#ci_date", s).value = draft.date;
+      $("#ci_bal", s).value = draft.bal;
+      $("#ci_inc", s).checked = draft.inc;
+      $("#ci_note", s).value = draft.note;
+      upd(false);
+    } else upd(true);
+  }, "checkin");
 }
 function saveCheckin() {
   const d = val("ci_date") || E.toISO(today);
@@ -481,6 +497,7 @@ function saveCheckin() {
   const start = E.startCheckpoint(data);
   if (start && d === start.date) { cp.includes_today = start.includes_today; cp.note = "Starting balance"; }
   E.addCheckpoint(data, cp);
+  markPrompted();
   closeSheet();
   save("Check-in saved — forecast updated", true);
 }
@@ -832,6 +849,10 @@ async function shareFile(file) {
 
 // ------------------------------------------------------------------ app lock
 function renderLock() {
+  const s = sheet();
+  if (s.open && s.dataset.kind === "checkin" && $("#ci_bal", s)) {
+    checkinDraft = { date: val("ci_date"), bal: val("ci_bal"), inc: checked("ci_inc"), note: val("ci_note") };
+  }
   closeSheet();
   $("#tabs").classList.add("hidden");
   const wait = L.waitSeconds();
@@ -864,7 +885,8 @@ function unlock() {
   locked = false;
   hiddenAt = null;
   refresh();
-  startupPrompt();
+  if (checkinDraft) { const d = checkinDraft; checkinDraft = null; setTimeout(() => sheetCheckin(d), 250); }
+  else startupPrompt();
 }
 
 function sheetSecurity() {
@@ -902,7 +924,7 @@ document.addEventListener("click", async (ev) => {
   if (t.dataset.tab) { tab = t.dataset.tab; render(); window.scrollTo(0, 0); return; }
   const ds = t.dataset;
   switch (ds.act) {
-    case "close": closeSheet(); break;
+    case "close": userClose(); break;
     case "eye": localStorage.setItem("bt-hide-balance", balanceHidden() ? "0" : "1"); render(); break;
     case "calendar": sheetCalendar(); break;
     case "calexport": await exportCalendar(); break;
@@ -1084,9 +1106,7 @@ document.addEventListener("visibilitychange", () => {
 function startupPrompt() {
   const lc = E.latestCheckpoint(data);
   if (lc && E.toDay(lc.date) < today && localStorage.getItem("bt-prompt") !== "0" && meta.lastPrompt !== E.toISO(today)) {
-    meta.lastPrompt = E.toISO(today);
-    persist();
-    setTimeout(sheetCheckin, 400);
+    setTimeout(() => { if (!locked && !sheet().open) sheetCheckin(); }, 400);
   }
 }
 if (locked) tryFaceId(true); else startupPrompt();
