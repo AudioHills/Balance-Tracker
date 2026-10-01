@@ -232,12 +232,14 @@ class MainWindow(QMainWindow):
         nxt = f.next_income(self.today) if not f.empty else None
         self.side_next.setText(f"Next income {nxt.date.strftime('%b %d')} · {money.fmt(nxt.amount)}" if nxt else "")
 
-    def commit(self, theme_changed: bool = False, toast: str | None = None, undoable: bool = False):
+    def commit(self, theme_changed: bool = False, toast: str | None = None, undoable: bool = False,
+               restamp: bool = True):
         money.set_symbol(self.data.settings.currency_symbol)
         try:
-            self.store.save(self.data)
+            self.store.save(self.data, restamp=restamp)
         except OSError as e:
             QMessageBox.critical(self, "Couldn't save", f"Your changes could not be saved:\n{e}")
+        self._write_sync()
         if theme_changed:
             theme.apply_theme(QApplication.instance(), self.data.settings.theme)
         self.recompute()
@@ -259,6 +261,7 @@ class MainWindow(QMainWindow):
 
     def _tick(self):
         self.maybe_send_digest()
+        self.sync_in()
         if date.today() != self.today:
             self.today = date.today()
             self.recompute()
@@ -512,10 +515,93 @@ class MainWindow(QMainWindow):
     # ---- startup -------------------------------------------------------
     def startup_prompt(self):
         QTimer.singleShot(1500, self.maybe_send_digest)
+        self.sync_in(force=True)
         if not self.data.has_start:
             self.first_run()
         elif self.data.settings.prompt_on_open and self.data.latest_checkpoint.date < self.today:
             self.check_in()
+
+    # ---- iPhone sync ---------------------------------------------------
+    def sync_folder(self):
+        from pathlib import Path
+        s = self.data.settings
+        return Path(s.sync_folder) if s.sync_enabled and s.sync_folder else None
+
+    def _write_sync(self):
+        from .. import sync
+        folder = self.sync_folder()
+        if folder is None:
+            return
+        try:
+            sync.write_sync_file(folder, self.data)
+            self._sync_seen = self._sync_mtimes(folder)
+            self._sync_error = ""
+        except OSError as e:
+            self._sync_error = str(e)
+
+    @staticmethod
+    def _sync_mtimes(folder) -> dict:
+        from .. import sync
+        out = {}
+        for p in sync.sync_files(folder):
+            try:
+                out[str(p)] = p.stat().st_mtime
+            except OSError:
+                pass
+        return out
+
+    def sync_in(self, force: bool = False) -> int:
+        """Merge changes the iPhone saved into the sync folder. Returns 1 if anything changed."""
+        import shutil
+        from datetime import datetime as _dt
+        from .. import storage, sync
+        folder = self.sync_folder()
+        if folder is None:
+            return 0
+        mtimes = self._sync_mtimes(folder)
+        if not force and mtimes == getattr(self, "_sync_seen", None):
+            return 0
+        merged = self.data
+        extras = []
+        for p in sync.sync_files(folder):
+            try:
+                merged = sync.merge(merged, storage.read_backup(p))
+            except (OSError, ValueError, KeyError, TypeError):
+                continue  # half-downloaded or not ours; try again next time
+            if p.name != sync.SYNC_FILE:
+                extras.append(p)
+        self._sync_seen = mtimes
+        self._last_sync = _dt.now()
+        changed = not sync.same(merged, self.data)
+        if changed:
+            self.data = merged
+            self.commit(toast="📱 Synced changes from your iPhone", restamp=False)
+        for p in extras:  # copies like "BalanceTracker-sync 2.json" are merged; tidy them away
+            try:
+                self.store.backup_dir.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(p), str(self.store.backup_dir / f"merged-{_dt.now():%Y%m%d-%H%M%S}-{p.name}"))
+            except OSError:
+                pass
+        if extras and not changed:
+            self._write_sync()
+        return int(changed)
+
+    def enable_sync(self, folder: str | None):
+        s = self.data.settings
+        s.sync_enabled = bool(folder)
+        if folder:
+            s.sync_folder = folder
+        self.commit()
+        if folder:
+            self.sync_in(force=True)
+            self._write_sync()
+            self.toast("iPhone sync is on — open the phone app and tap Sync")
+
+    def changeEvent(self, e):
+        from PySide6.QtCore import QEvent
+        super().changeEvent(e)
+        if e.type() == QEvent.ActivationChange and self.isActiveWindow() and hasattr(self, "pages"):
+            QTimer.singleShot(300, self.sync_in)
 
     def resizeEvent(self, e):
         super().resizeEvent(e)

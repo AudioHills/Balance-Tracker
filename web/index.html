@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Balance Tracker</title>
+  <meta name="description" content="Day-by-day chequing forecast, bills, debts and check-ins.">
+  <meta name="theme-color" content="#F3F5FA" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0E1117" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Balance">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <link rel="icon" type="image/png" href="icons/icon-192.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main id="app"></main>
+  <nav class="tabs" id="tabs">
+    <button data-tab="home" class="on"><span class="ic">◉</span>Home</button>
+    <button data-tab="days"><span class="ic">☰</span>Day by day</button>
+    <button data-tab="bills"><span class="ic">⇅</span>Bills</button>
+    <button data-tab="debts"><span class="ic">◈</span>Debts</button>
+    <button data-tab="more"><span class="ic">⋯</span>More</button>
+  </nav>
+  <dialog class="sheet" id="sheet"></dialog>
+  <div id="toast"></div>
+  <input type="file" id="filepick" class="hidden">
+  <script type="module" src="app.js"></script>
+</body>
+</html>

@@ -61,6 +61,27 @@ monthly, yearly…), and Balance Tracker works out every future date and the run
 - **Keyboard shortcuts:** `Ctrl+1…6` switch pages, `Ctrl+K` check in, `Ctrl+I` add income,
   `Ctrl+B` add bill, `Ctrl+D` add debt, `Ctrl+A` "Can I afford it?".
 
+## iPhone app
+
+The `web/` folder is an installable web app (PWA). Open it in Safari, then tap **Share → Add to
+Home Screen**. It runs offline, keeps its data on the phone, and uses the same forecasting and debt
+engine as the PC: `tests/test_web_engine.py` checks that both produce identical numbers.
+
+**Syncing with the PC through iCloud Drive**
+1. On the PC, install **iCloud for Windows** (Microsoft Store), sign in, and turn on iCloud Drive.
+2. In Balance Tracker on the PC, go to **Settings → iPhone sync → Turn on iPhone sync**. The PC then
+   keeps `iCloud Drive\Balance Tracker\BalanceTracker-sync.json` up to date.
+3. On the iPhone, tap **⟳ → Choose sync file** and pick that file to pull the PC's data in. To send
+   phone edits back, tap **Send to PC → Save to Files → iCloud Drive → Balance Tracker → Replace**.
+   The PC merges them within a minute.
+
+Each income/bill and debt carries a change timestamp, and deletions are remembered. Merging keeps
+the newest version of every record, so edits made on either device survive whichever order you sync in.
+
+**Hosting.** `web/` is a static site. `.github/workflows/pages.yml` deploys it to GitHub Pages
+(the repository must be public on GitHub Free), or point Cloudflare Pages or Netlify at the `web`
+folder. Set `WEB_APP_URL` in `balance_tracker/__init__.py` so the PC's Settings page links to it.
+
 ## Getting the .exe
 
 **Option A: download it from GitHub.** Open the repository's **Releases** page (right-hand side of
@@ -116,5 +137,7 @@ Code layout:
 | `balance_tracker/debts.py` | Debt payoff simulation and the cushion-aware payment planner |
 | `balance_tracker/notify.py` | Daily reminder digest, email/ntfy delivery, Windows scheduled task |
 | `balance_tracker/reminders.py` | Calendar (.ics) export |
+| `balance_tracker/sync.py` | iPhone sync: change stamps, deletion markers, record-level merge |
+| `web/` | iPhone web app: `engine.js` (port of the engine), `app.js` (UI), service worker, manifest |
 | `balance_tracker/storage.py` | Load/save, automatic backups, import/export, CSV |
 | `balance_tracker/ui/` | PySide6 (Qt) interface: theme, pages, dialogs, custom charts |

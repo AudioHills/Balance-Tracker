@@ -51,16 +51,23 @@ class Store:
         with open(self.path, encoding="utf-8") as f:
             return AppData.from_dict(json.load(f))
 
-    def save(self, data: AppData) -> None:
+    def save(self, data: AppData, restamp: bool = True) -> None:
+        """Save. `restamp=False` stores merged sync data as-is (its timestamps are already right)."""
         # The background reminder task may have sent today's digest since this copy was
         # loaded; never move "last sent" backwards (that could send a duplicate email).
+        prev = None
         try:
             with open(self.path, encoding="utf-8") as f:
-                on_disk = json.load(f).get("settings", {}).get("notify_last_sent", "")
+                raw = json.load(f)
+            on_disk = raw.get("settings", {}).get("notify_last_sent", "")
             if on_disk > data.settings.notify_last_sent:
                 data.settings.notify_last_sent = on_disk
-        except (OSError, ValueError, AttributeError):
+            prev = AppData.from_dict(raw)
+        except (OSError, ValueError, AttributeError, KeyError, TypeError):
             pass
+        if restamp:
+            from .sync import stamp
+            stamp(prev, data)  # timestamps + deletion markers for iPhone sync
         text = json.dumps(data.to_dict(), indent=2)
         _atomic_write(self.path, text)
         self._auto_backup(text)

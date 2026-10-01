@@ -1,0 +1,39 @@
+name: Deploy iPhone web app
+
+# Publishes web/ to GitHub Pages. Needs Pages turned on (Settings → Pages → Source:
+# "GitHub Actions"), which on GitHub Free requires the repository to be public.
+on:
+  push:
+    branches: ["claude/balance-tracker-app"]
+    paths: ["web/**", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    if: github.event.repository.private == false || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Check the engine loads
+        run: node -e "import('./web/engine.js').then(E => { if (!E.makePlan) process.exit(1) })"
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+      - id: deployment
+        uses: actions/deploy-pages@v4

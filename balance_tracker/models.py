@@ -81,6 +81,7 @@ class RecurringItem:
     overrides: dict = field(default_factory=dict)
     # Debt id of the credit card this bill is charged to (paid off from chequing right away)
     paid_with: str = ""
+    updated: str = ""  # UTC timestamp of the last change (for iPhone sync)
     id: str = field(default_factory=new_id)
 
     @property
@@ -120,6 +121,7 @@ class RecurringItem:
             active=bool(d.get("active", True)),
             overrides=overrides,
             paid_with=str(d.get("paid_with") or ""),
+            updated=str(d.get("updated") or ""),
         )
 
 
@@ -175,6 +177,7 @@ class Debt:
     linked_bill_id: str = ""  # an Income & Bills entry that already pays this debt
     updated_on: date = field(default_factory=date.today)
     notes: str = ""
+    updated: str = ""  # UTC timestamp of the last change (for iPhone sync)
     id: str = field(default_factory=new_id)
 
     def to_dict(self) -> dict:
@@ -199,6 +202,7 @@ class Debt:
             linked_bill_id=str(d.get("linked_bill_id") or ""),
             updated_on=_d(d.get("updated_on")) or date.today(),
             notes=str(d.get("notes", "")),
+            updated=str(d.get("updated") or ""),
         )
 
 
@@ -228,6 +232,9 @@ class Settings:
     notify_time: str = "08:00"
     notify_last_sent: str = ""  # ISO date of the last daily digest
     notify_task: bool = False  # Windows scheduled task registered
+    # iPhone sync through iCloud Drive
+    sync_enabled: bool = False
+    sync_folder: str = ""
     account_name: str = "Chequing"
     # Debt payoff plan
     debt_strategy: str = "avalanche"
@@ -261,6 +268,9 @@ class AppData:
     debts: list = field(default_factory=list)  # list[Debt]
     # "item_id|YYYY-MM-DD" keys of card charges the user has marked as paid off
     card_paid: list = field(default_factory=list)
+    # Sync bookkeeping: id -> UTC time it was deleted; when shared settings last changed
+    deleted: dict = field(default_factory=dict)
+    settings_updated: str = ""
     settings: Settings = field(default_factory=Settings)
 
     # ---- convenience -------------------------------------------------
@@ -306,6 +316,8 @@ class AppData:
             "checkpoints": [c.to_dict() for c in self.sorted_checkpoints()],
             "debts": [d.to_dict() for d in self.debts],
             "card_paid": sorted(self.card_paid)[-500:],
+            "deleted": dict(self.deleted),
+            "settings_updated": self.settings_updated,
         }
 
     @classmethod
@@ -319,5 +331,7 @@ class AppData:
             checkpoints=[Checkpoint.from_dict(c) for c in d.get("checkpoints", [])],
             debts=[Debt.from_dict(x) for x in d.get("debts", [])],
             card_paid=[str(k) for k in d.get("card_paid", [])],
+            deleted={str(k): str(v) for k, v in (d.get("deleted") or {}).items()},
+            settings_updated=str(d.get("settings_updated") or ""),
             settings=Settings.from_dict(d.get("settings", {})),
         )

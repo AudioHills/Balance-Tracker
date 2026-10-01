@@ -21,6 +21,11 @@ from .dialogs import date_edit, from_qdate, to_qdate
 from .widgets import Banner, BalanceChart, Card, MonthlyBars, MoneySpin, StatCard, hbox, label
 
 
+def escape_html(text: str) -> str:
+    from html import escape
+    return escape(text)
+
+
 def page_shell(title: str, subtitle: str):
     """A scrollable page with a title row. Returns (page, body_layout, header_layout)."""
     page = QScrollArea()
@@ -788,6 +793,27 @@ class SettingsPage:
 
         # --- data
         data = Card()
+        # --- iPhone sync
+        phone = Card()
+        phone.lay.addWidget(label("📱 iPhone sync (through iCloud Drive)", "SectionTitle"))
+        phone.lay.addWidget(label(
+            "Use Balance Tracker on your iPhone too. This PC keeps a sync file in your iCloud Drive; the phone "
+            "app reads it and saves its changes back. Edits on either device are merged — the newest wins.",
+            "Hint", wrap=True))
+        self.sync_status = label("", "Muted", wrap=True)
+        self.sync_status.setTextFormat(Qt.RichText)
+        self.sync_status.setOpenExternalLinks(True)
+        phone.lay.addWidget(self.sync_status)
+        self.sync_btn = QPushButton()
+        self.sync_btn.clicked.connect(self.toggle_sync)
+        choose = QPushButton("Choose folder…")
+        choose.clicked.connect(self.choose_sync_folder)
+        now = QPushButton("Sync now")
+        now.clicked.connect(lambda: (self.ctx.sync_in(force=True) or self.ctx.toast("Up to date")))
+        self.sync_now = now
+        phone.lay.addLayout(hbox(self.sync_btn, choose, now, None))
+        lay.addWidget(phone)
+
         data.lay.addWidget(label("Backup & restore", "SectionTitle"))
         self.data_path = label("", "Hint", wrap=True)
         self.data_path.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -844,6 +870,7 @@ class SettingsPage:
             self.start_date.setDate(to_qdate(d.start.date))
         self.start_bal.setPrefix(money._symbol)
         self.data_path.setText(f"Your data is stored at: {self.ctx.store.path}")
+        self._refresh_sync()
         self.auto.clear()
         for p in self.ctx.store.auto_backups():
             self.auto.addItem(p.stem.replace("auto-", "Auto backup · ").replace("before-restore-", "Before restore · "),
@@ -864,6 +891,55 @@ class SettingsPage:
         s.forecast_months = self.horizon.value()
         s.prompt_on_open = self.prompt.isChecked()
         self.ctx.commit(theme_changed=theme_changed)
+
+    def _refresh_sync(self):
+        from .. import sync, WEB_APP_URL
+        s = self.ctx.data.settings
+        icloud = sync.icloud_drive()
+        app_link = (f"<br>Phone app: <a href='{WEB_APP_URL}'>{WEB_APP_URL}</a> — open it in Safari, then "
+                    f"Share → Add to Home Screen." if WEB_APP_URL else "")
+        if s.sync_enabled and s.sync_folder:
+            err = getattr(self.ctx, "_sync_error", "")
+            self.sync_status.setText(
+                f"✓ On — syncing through <b>{escape_html(s.sync_folder)}</b>"
+                + (f"<br><span style='color:{theme.colors()['negative']}'>Problem: {escape_html(err)}</span>" if err else "")
+                + "<br>On your iPhone: Files → iCloud Drive → Balance Tracker." + app_link)
+            self.sync_btn.setText("Turn off")
+        else:
+            self.sync_status.setText(
+                ("iCloud Drive found at <b>" + escape_html(str(icloud)) + "</b>." if icloud else
+                 "iCloud Drive isn't set up on this PC yet. Install <b>iCloud for Windows</b> from the Microsoft "
+                 "Store, sign in with your Apple ID and tick <b>iCloud Drive</b> — then come back here.")
+                + app_link)
+            self.sync_btn.setText("Turn on iPhone sync")
+        self.sync_btn.setObjectName("Primary" if not s.sync_enabled else "")
+        self.sync_btn.style().unpolish(self.sync_btn)
+        self.sync_btn.style().polish(self.sync_btn)
+        self.sync_now.setVisible(s.sync_enabled)
+
+    def toggle_sync(self):
+        from .. import sync
+        s = self.ctx.data.settings
+        if s.sync_enabled:
+            self.ctx.enable_sync(None)
+            return
+        folder = s.sync_folder or (str(sync.default_sync_folder()) if sync.default_sync_folder() else "")
+        if not folder:
+            QMessageBox.information(
+                self.widget, "Set up iCloud Drive first",
+                "1. Install “iCloud for Windows” from the Microsoft Store.\n"
+                "2. Sign in with your Apple ID and tick iCloud Drive.\n"
+                "3. Come back and click “Turn on iPhone sync”.\n\n"
+                "Or click “Choose folder…” to pick any folder your iPhone can see (e.g. OneDrive).")
+            return
+        self.ctx.enable_sync(folder)
+
+    def choose_sync_folder(self):
+        from .. import sync
+        start = str(sync.icloud_drive() or "")
+        folder = QFileDialog.getExistingDirectory(self.widget, "Folder to sync with your iPhone", start)
+        if folder:
+            self.ctx.enable_sync(folder)
 
     def save_start(self):
         d = from_qdate(self.start_date.date())

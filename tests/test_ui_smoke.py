@@ -166,3 +166,36 @@ def test_card_todo_and_reminders(app, tmp_path, monkeypatch):
     # the item dialog offers the card under "Paid with"
     idlg = dialogs.ItemDialog(w.data, w.data.items[0], parent=w)
     assert idlg.paid_with.currentData() == visa.id
+
+
+def test_iphone_sync_roundtrip(app, tmp_path):
+    import json
+    from balance_tracker import sync
+    from balance_tracker.models import RecurringItem
+    t = date.today()
+    data = AppData()
+    data.checkpoints.append(Checkpoint(t, 100000))
+    data.items.append(RecurringItem("Rent", 150000, BILL, "monthly", t))
+    store = storage.Store(tmp_path / "pc")
+    w = MainWindow(store, data)
+    folder = tmp_path / "iCloudDrive" / "Balance Tracker"
+    w.enable_sync(str(folder))
+    shared = folder / sync.SYNC_FILE
+    assert shared.exists()
+
+    # the phone edits the file (adds a bill) and saves a copy next to it
+    phone = AppData.from_dict(json.loads(shared.read_text()))
+    prev = AppData.from_dict(phone.to_dict())
+    phone.items.append(RecurringItem("Gym", 5000, BILL, "monthly", t))
+    sync.stamp(prev, phone, "2099-01-01T00:00:00.000Z")
+    (folder / "BalanceTracker-sync 2.json").write_text(json.dumps(phone.to_dict()))
+
+    assert w.sync_in(force=True) == 1
+    assert {i.name for i in w.data.items} == {"Rent", "Gym"}
+    gym = next(i for i in store.load().items if i.name == "Gym")
+    assert gym.updated == "2099-01-01T00:00:00.000Z"  # kept the phone's timestamp
+    assert not (folder / "BalanceTracker-sync 2.json").exists()  # tidied into backups
+    assert "Gym" in shared.read_text()
+    assert w.sync_in(force=True) == 0  # nothing new
+    w.go(5)
+    app.processEvents()
