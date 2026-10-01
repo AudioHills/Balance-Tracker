@@ -42,9 +42,10 @@ monthly, yearly…), and Balance Tracker works out every future date and the run
 
 ## Getting the .exe
 
-**Option A: download it from GitHub.** Every push builds `BalanceTracker.exe` on GitHub Actions.
-Open the repository's **Actions** tab, pick the latest *Build Windows app* run, and download the
-**BalanceTracker-windows** artifact. Pushing a tag like `v1.0.0` also publishes the exe as a Release.
+**Option A: download it from GitHub.** Open the repository's **Releases** page (right-hand side of
+the repo's main page) and download `BalanceTracker.exe` from the latest release. A new release is
+published automatically whenever the default branch is updated; bump `__version__` in
+`balance_tracker/__init__.py` to make a new version number.
 
 **Option B: build it yourself on Windows.**
 1. Install Python 3.10 or newer from python.org (tick *Add python.exe to PATH*).
