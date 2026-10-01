@@ -1,0 +1,95 @@
+# Balance Tracker
+
+A modern Windows desktop app that forecasts your chequing account **day by day**.
+Enter your balance, add your paycheques and bills once (weekly, every 2 weeks, twice a month,
+monthly, yearly…), and Balance Tracker works out every future date and the running balance for you.
+
+## Features
+
+**What you asked for**
+- **Starting balance.** Entered on first launch, editable in Settings.
+- **Income and bills that repeat.** Choose one-time, weekly, every 2 weeks, every 4 weeks, twice a
+  month (e.g. the 15th and the last day), monthly, every 2, 3 or 6 months, or yearly. Optional end date.
+- **Day-by-day ledger.** Every day's running balance, either all days or only days with
+  activity. Export it to CSV for Excel.
+- **Check in on open.** Each time you open the app, it asks what your bank shows. The gap from the
+  plan is logged as **unplanned spending** (or unplanned income). It appears as its own line in the
+  ledger, and the forecast is re-anchored to your real balance.
+- **Modern UI** with a light theme, a dark theme, or one that follows Windows.
+- **Backup and import.** Export a backup file, import it (replace or merge), and restore automatic
+  daily backups.
+
+**Extras**
+- **Safe to spend:** how much you could spend today without any day in the next 30 days dropping
+  below your cushion.
+- **Overdraft and low-balance alerts:** a banner warns you before the forecast goes negative or
+  below a cushion you set.
+- **Interactive forecast chart:** hover over any day to see its balance, click it to open that day
+  in the ledger.
+- **Weekend handling:** a payday that falls on a Saturday or Sunday can move to the Friday before
+  or the Monday after.
+- **Month-end smart dates:** a bill on the 31st lands on Feb 28/29, Apr 30, and so on.
+- **One-off changes:** right-click a ledger line to *skip it this time* or *change the amount this
+  time* (e.g. a bigger hydro bill) without touching the schedule.
+- **Unplanned spending trends:** a monthly chart, a monthly average, and a running total since you
+  started.
+- **Monthly snapshot:** average income, bills, and money left over per month, plus how much of it
+  goes to unplanned spending.
+- **Undo** after deletes and edits. Automatic daily backups (last 30 days kept) and a safety copy
+  before every restore.
+- **Keyboard shortcuts:** `Ctrl+1…5` switch pages, `Ctrl+K` check in, `Ctrl+I` add income,
+  `Ctrl+B` add bill.
+
+## Getting the .exe
+
+**Option A: download it from GitHub.** Every push builds `BalanceTracker.exe` on GitHub Actions.
+Open the repository's **Actions** tab, pick the latest *Build Windows app* run, and download the
+**BalanceTracker-windows** artifact. Pushing a tag like `v1.0.0` also publishes the exe as a Release.
+
+**Option B: build it yourself on Windows.**
+1. Install Python 3.10 or newer from python.org (tick *Add python.exe to PATH*).
+2. Double-click `build.bat`. The program appears at `dist\BalanceTracker.exe`.
+
+To run from source without building, double-click `run.bat`, or run `pip install -r requirements.txt`
+and then `python main.py`.
+
+> Windows SmartScreen may warn about an unsigned app the first time. Click *More info → Run anyway*.
+
+## Where your data lives
+
+`%APPDATA%\BalanceTracker\data.json`, with daily snapshots in the `backups` folder next to it.
+The Settings page shows the exact path and has an *Open data folder* button. Set the
+`BALANCE_TRACKER_HOME` environment variable to keep the data somewhere else (e.g. a OneDrive folder).
+
+## How check-ins work
+
+The forecast starts from your starting balance and adds or subtracts each scheduled item.
+When you check in with your real balance:
+
+```
+plan expected  $1,240.00
+bank shows     $1,105.00
+               ---------
+unplanned      −$135.00   ← recorded as "Check-in: unplanned spending"
+```
+
+From then on, the forecast continues from $1,105.00. If that day's paycheque or bills have
+already landed, leave *"This balance already includes that day's scheduled items"* ticked.
+Otherwise untick it, and they'll be applied after your check-in.
+
+## Development
+
+```
+pip install -r requirements-dev.txt
+python -m pytest            # engine tests and an offscreen UI smoke test
+python main.py
+```
+
+Code layout:
+
+| Path | What |
+| --- | --- |
+| `balance_tracker/models.py` | Data classes (amounts in integer cents) and JSON (de)serialisation |
+| `balance_tracker/forecast.py` | Schedule generation and the day-by-day projection engine |
+| `balance_tracker/storage.py` | Load/save, automatic backups, import/export, CSV |
+| `balance_tracker/ui/` | PySide6 (Qt) interface: theme, pages, dialogs, custom charts |
