@@ -46,9 +46,15 @@ monthly, yearly…), and Balance Tracker works out every future date and the run
 - **Credit-card bills:** set a bill's *Paid with* to a credit card if it's charged to the card and you
   pay the card off right away. It shows as "Pay Visa: Netflix" in the forecast. Charges from the
   last two weeks appear in a **Pay your card** list on the Dashboard, where you tick them off once paid.
-- **Phone reminders:** *📱 Reminders* exports a calendar file (.ics) with alerts for card charges,
-  debt payments, bills and paydays. Import it into Google Calendar, iPhone Calendar or Outlook,
-  and your phone reminds you even when the PC is off.
+- **Email & phone reminders:** *📱 Reminders → Email & phone reminders* sends a short daily email
+  on days something needs doing, e.g. "Pay Visa $11.99 — Spotify", debt payments due, bills,
+  paydays and low-balance warnings. It sends through your own Gmail/Outlook/Yahoo/iCloud account
+  using an *app password*, which is encrypted with Windows DPAPI and never included in backups.
+  You can also get push notifications through the free **ntfy** app. A Windows scheduled task sends
+  the reminders even when the app is closed; it catches up at logon if the PC was off, and sends at
+  most one message per day. Activity is logged to `reminders.log` in the data folder.
+- **Calendar reminders:** *📱 Reminders → Export to my calendar* saves a .ics file for Google
+  Calendar, iPhone Calendar or Outlook, so reminders fire from your phone even when the PC is off.
 - **Can I afford it?:** test a purchase on any date. It tells you whether you stay above your
   cushion and, if not, the first date it would fit.
 - **Calendar date pickers:** click any date box to pick a date from a calendar.
@@ -108,5 +114,7 @@ Code layout:
 | `balance_tracker/models.py` | Data classes (amounts in integer cents) and JSON (de)serialisation |
 | `balance_tracker/forecast.py` | Schedule generation and the day-by-day projection engine |
 | `balance_tracker/debts.py` | Debt payoff simulation and the cushion-aware payment planner |
+| `balance_tracker/notify.py` | Daily reminder digest, email/ntfy delivery, Windows scheduled task |
+| `balance_tracker/reminders.py` | Calendar (.ics) export |
 | `balance_tracker/storage.py` | Load/save, automatic backups, import/export, CSV |
 | `balance_tracker/ui/` | PySide6 (Qt) interface: theme, pages, dialogs, custom charts |

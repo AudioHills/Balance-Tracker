@@ -210,6 +210,24 @@ class Settings:
     forecast_months: int = 6
     prompt_on_open: bool = True
     reminder_time: str = "09:00"  # time of day for phone calendar reminders
+    # Daily reminder emails / phone notifications
+    email_enabled: bool = False
+    email_to: str = ""
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_ssl: bool = False  # True = SSL on connect (port 465); False = STARTTLS
+    ntfy_enabled: bool = False
+    ntfy_topic: str = ""
+    notify_card: bool = True
+    notify_debts: bool = True
+    notify_bills: bool = False
+    notify_paydays: bool = False
+    notify_low: bool = True
+    notify_days_before: int = 1
+    notify_time: str = "08:00"
+    notify_last_sent: str = ""  # ISO date of the last daily digest
+    notify_task: bool = False  # Windows scheduled task registered
     account_name: str = "Chequing"
     # Debt payoff plan
     debt_strategy: str = "avalanche"

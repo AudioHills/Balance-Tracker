@@ -30,6 +30,14 @@ def _load(store: storage.Store) -> AppData:
 
 
 def main() -> int:
+    if "--send-reminders" in sys.argv:  # run by Windows Task Scheduler; no window
+        from . import notify
+        try:
+            notify.run_daily(storage.Store())
+        except Exception as e:  # noqa: BLE001 - never crash a background task
+            notify._log(storage.Store().folder, f"error: {e}")
+            return 1
+        return 0
     if sys.platform == "win32":
         try:  # own taskbar icon/grouping instead of python.exe's
             import ctypes

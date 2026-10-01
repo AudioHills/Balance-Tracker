@@ -52,6 +52,15 @@ class Store:
             return AppData.from_dict(json.load(f))
 
     def save(self, data: AppData) -> None:
+        # The background reminder task may have sent today's digest since this copy was
+        # loaded; never move "last sent" backwards (that could send a duplicate email).
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                on_disk = json.load(f).get("settings", {}).get("notify_last_sent", "")
+            if on_disk > data.settings.notify_last_sent:
+                data.settings.notify_last_sent = on_disk
+        except (OSError, ValueError, AttributeError):
+            pass
         text = json.dumps(data.to_dict(), indent=2)
         _atomic_write(self.path, text)
         self._auto_backup(text)

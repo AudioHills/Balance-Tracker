@@ -4,7 +4,7 @@ from __future__ import annotations
 import copy
 from datetime import date, timedelta
 
-from PySide6.QtCore import QTimer, Qt, QPropertyAnimation
+from PySide6.QtCore import QObject, QPropertyAnimation, QTimer, Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QMainWindow,
@@ -12,11 +12,13 @@ from PySide6.QtWidgets import (
 )
 
 from .. import money, storage
-from ..debts import make_plan, plan_start
+from ..debts import full_forecast, make_plan
 from ..forecast import Forecast, projection_end
 from ..models import AppData, BILL, INCOME, Checkpoint, new_id
 from . import theme
-from .dialogs import AffordDialog, CheckInDialog, DebtDialog, ItemDialog, RemindersDialog, WelcomeDialog
+from .dialogs import (
+    AffordDialog, CheckInDialog, DebtDialog, ItemDialog, NotifyDialog, RemindersDialog, WelcomeDialog,
+)
 from .icon import app_icon
 from .pages import CheckinsPage, DashboardPage, DebtsPage, ItemsPage, LedgerPage, SettingsPage
 from .widgets import label
@@ -68,6 +70,11 @@ class Toast(QFrame):
         self.anim.start()
 
 
+class _Sender(QObject):
+    """Sends the daily digest off the UI thread."""
+    done = Signal(str, list)  # (date sent, errors)
+
+
 class MainWindow(QMainWindow):
     NAV = ["Dashboard", "Day by day", "Income & Bills", "Debts", "Check-ins", "Settings"]
 
@@ -111,6 +118,8 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+T"), self, self.toggle_theme)
 
         # Roll the "today" marker over at midnight if the app is left open.
+        self._sender = _Sender()
+        self._sender.done.connect(self._digest_done)
         self.clock = QTimer(self, interval=60_000, timeout=self._tick)
         self.clock.start()
         self.refresh_all()
@@ -199,18 +208,11 @@ class MainWindow(QMainWindow):
     def build_forecast(self, extra=None, data: AppData | None = None, end: date | None = None,
                        debt_extras: bool = True) -> Forecast:
         """The day-by-day forecast, including planned debt payments when that option is on."""
-        data = data or self.data
         if end is None:
             end = projection_end(self.data, self.today)
             if self._ledger_end and self._ledger_end > end:
                 end = self._ledger_end
-        extra = list(extra or [])
-        suppress = {}
-        if self.plan is not None and self.data.settings.debt_in_forecast:
-            extra += self.plan.occurrences(self.data.debts, include_extra=debt_extras)
-            start = plan_start(self.data, self.today)
-            suppress = {d.linked_bill_id: start for d in self.data.debts if d.linked_bill_id}
-        return Forecast(data, end, self.today, extra=extra, suppress=suppress)
+        return full_forecast(self.data, self.plan, self.today, end, extra, debt_extras, source=data)
 
     def extend_forecast(self, end: date):
         self._ledger_end = end
@@ -256,6 +258,7 @@ class MainWindow(QMainWindow):
             self.commit(toast="Undone")
 
     def _tick(self):
+        self.maybe_send_digest()
         if date.today() != self.today:
             self.today = date.today()
             self.recompute()
@@ -342,6 +345,67 @@ class MainWindow(QMainWindow):
             self.commit(toast=f"Added “{dlg.result_item.name}” as a one-time bill")
 
     def reminders(self):
+        """Menu: email/phone reminders or calendar export."""
+        from PySide6.QtGui import QCursor
+        from PySide6.QtWidgets import QMenu
+        m = QMenu(self)
+        m.addAction("✉  Email && phone reminders…", self.notify_settings)
+        m.addAction("📅  Export to my calendar…", self.calendar_export)
+        m.exec(QCursor.pos())
+
+    def notify_settings(self):
+        from .. import notify
+        dlg = NotifyDialog(self.data, self.store.folder, self)
+        if not dlg.exec():
+            return
+        s = self.data.settings
+        msg = "Reminder settings saved"
+        try:
+            if dlg.want_task:
+                notify.install_task(s.notify_time)
+                s.notify_task = True
+                msg = f"Reminders on — you'll get them daily around {_ampm(s.notify_time)}"
+            elif s.notify_task:
+                notify.remove_task()
+                s.notify_task = False
+        except OSError as e:
+            s.notify_task = False
+            QMessageBox.warning(self, "Background reminders",
+                                f"Reminders will be sent while Balance Tracker is open, but the background "
+                                f"task couldn't be set up:\n{e}")
+        self.commit(toast=msg)
+        self.maybe_send_digest()
+
+    def maybe_send_digest(self):
+        """Send today's digest from the app if it's due (the scheduled task may not have run yet)."""
+        import copy
+        import threading
+        from .. import notify
+        if getattr(self, "_sending", False) or getattr(self, "_failed_day", None) == self.today \
+                or not notify.due_now(self.data):
+            return
+        self._sending = True
+        snapshot = copy.deepcopy(self.data)
+        today = self.today
+        folder = self.store.folder
+
+        def work():
+            digest = notify.compose(snapshot, today)
+            errors = notify.deliver(snapshot, folder, digest) if digest else []
+            notify._log(folder, "app: " + ("; ".join(errors) or ("sent" if digest else "nothing to send")))
+            self._sender.done.emit(today.isoformat(), errors)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _digest_done(self, day: str, errors: list):
+        self._sending = False
+        if errors:
+            self._failed_day = date.fromisoformat(day)  # don't retry every minute
+            self.toast("Couldn't send today's reminder — check Email & phone reminders")
+            return
+        self.data.settings.notify_last_sent = day
+        self.commit()
+
+    def calendar_export(self):
         dlg = RemindersDialog(self.data, self.plan, self.today, self)
         if dlg.exec():
             self.commit(toast=f"Saved {dlg.saved_count} reminders — now import the file into your phone's calendar")
@@ -447,6 +511,7 @@ class MainWindow(QMainWindow):
 
     # ---- startup -------------------------------------------------------
     def startup_prompt(self):
+        QTimer.singleShot(1500, self.maybe_send_digest)
         if not self.data.has_start:
             self.first_run()
         elif self.data.settings.prompt_on_open and self.data.latest_checkpoint.date < self.today:
@@ -457,3 +522,8 @@ class MainWindow(QMainWindow):
         if self.toast_w.isVisible():
             self.toast_w.move((self.width() - self.toast_w.width()) // 2 + 110,
                               self.height() - self.toast_w.height() - 28)
+
+
+def _ampm(hhmm: str) -> str:
+    h, m = (int(x) for x in hhmm.split(":"))
+    return f"{(h % 12) or 12}:{m:02d} {'AM' if h < 12 else 'PM'}"

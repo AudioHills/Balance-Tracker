@@ -250,3 +250,16 @@ def make_plan(data: AppData, today: date, strategy: Optional[str] = None, mode: 
             extras[m] = room
             plan = simulate(debts, today, strategy, extras)
     return plan
+
+
+def full_forecast(data: AppData, plan: Optional[Plan], today: date, end: date, extra=None,
+                  debt_extras: bool = True, source: Optional[AppData] = None) -> Forecast:
+    """The user's forecast, with planned debt payments added when that option is on.
+    `source` lets callers project a modified copy of `data` (e.g. without a check-in)."""
+    extra = list(extra or [])
+    suppress = {}
+    if plan is not None and data.settings.debt_in_forecast:
+        extra += plan.occurrences(data.debts, include_extra=debt_extras)
+        start = plan_start(data, today)
+        suppress = {d.linked_bill_id: start for d in data.debts if d.linked_bill_id}
+    return Forecast(source or data, end, today, extra=extra, suppress=suppress)
