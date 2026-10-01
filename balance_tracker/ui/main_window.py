@@ -108,6 +108,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+B"), self, lambda: self.add_item(BILL))
         QShortcut(QKeySequence("Ctrl+D"), self, self.add_debt)
         QShortcut(QKeySequence("Ctrl+A"), self, self.afford)
+        QShortcut(QKeySequence("Ctrl+T"), self, self.toggle_theme)
 
         # Roll the "today" marker over at midnight if the app is left open.
         self.clock = QTimer(self, interval=60_000, timeout=self._tick)
@@ -131,6 +132,12 @@ class MainWindow(QMainWindow):
         names.addWidget(label("Tracker", "BrandSub"))
         brand.addWidget(logo)
         brand.addLayout(names, 1)
+        self.theme_btn = QPushButton()
+        self.theme_btn.setObjectName("ThemeToggle")
+        self.theme_btn.setCursor(Qt.PointingHandCursor)
+        self.theme_btn.setFixedSize(36, 36)
+        self.theme_btn.clicked.connect(self.toggle_theme)
+        brand.addWidget(self.theme_btn, 0, Qt.AlignVCenter)
         v.addLayout(brand)
         v.addSpacing(22)
         self.nav_btns = []
@@ -165,6 +172,15 @@ class MainWindow(QMainWindow):
         ci.clicked.connect(self.check_in)
         v.addWidget(ci)
         return side
+
+    def toggle_theme(self):
+        self.data.settings.theme = "light" if theme.is_dark() else "dark"
+        self.commit(theme_changed=True)
+
+    def _update_theme_button(self):
+        dark = theme.is_dark()
+        self.theme_btn.setText("☀" if dark else "☾")
+        self.theme_btn.setToolTip(("Switch to light mode" if dark else "Switch to dark mode") + "  (Ctrl+T)")
 
     def go(self, i: int):
         self.stack.setCurrentIndex(i)
@@ -201,6 +217,7 @@ class MainWindow(QMainWindow):
         self.recompute()
 
     def refresh_all(self):
+        self._update_theme_button()
         for p in self.pages:
             p.refresh()
         f, s = self.forecast, self.data.settings

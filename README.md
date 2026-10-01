@@ -15,7 +15,8 @@ monthly, yearly…), and Balance Tracker works out every future date and the run
 - **Check in on open.** Each time you open the app, it asks what your bank shows. The gap from the
   plan is logged as **unplanned spending** (or unplanned income). It appears as its own line in the
   ledger, and the forecast is re-anchored to your real balance.
-- **Modern UI** with a light theme, a dark theme, or one that follows Windows.
+- **Modern UI** with light and dark modes. Click the ☾/☀ button at the top of the sidebar (or press
+  `Ctrl+T`) to switch, or choose *Match Windows* in Settings.
 - **Backup and import.** Export a backup file, import it (replace or merge), and restore automatic
   daily backups.
 

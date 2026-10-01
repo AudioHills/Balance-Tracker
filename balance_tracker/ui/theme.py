@@ -26,6 +26,10 @@ DARK = {
 _current = dict(LIGHT)
 
 
+def is_dark() -> bool:
+    return _current["bg"] == DARK["bg"]
+
+
 def colors() -> dict:
     return _current
 
@@ -104,6 +108,10 @@ QToolTip {{ background: {surface2}; color: {text}; border: 1px solid {border}; p
 }}
 #NavButton:hover {{ background: {surface2}; color: {text}; }}
 #NavButton:checked {{ background: {accent_soft}; color: {accent}; }}
+QPushButton#ThemeToggle {{
+    border-radius: 18px; padding: 0; font-size: 14pt; background: {surface2}; border: 1px solid {border};
+}}
+QPushButton#ThemeToggle:hover {{ border-color: {accent}; color: {accent}; }}
 #SidebarBalanceLabel {{ color: {muted}; font-size: 9pt; }}
 #SidebarBalance {{ font-size: 15pt; font-weight: 700; }}
 

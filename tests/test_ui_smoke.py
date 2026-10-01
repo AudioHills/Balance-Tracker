@@ -75,6 +75,10 @@ def test_full_flow(app, tmp_path, monkeypatch):
     sp.theme.setCurrentIndex(2)
     assert w.data.settings.theme == "dark"
     assert store.load().settings.theme == "dark"
+    w.toggle_theme()
+    assert w.data.settings.theme == "light" and not theme.is_dark()
+    w.toggle_theme()
+    assert theme.is_dark()
 
 
 def test_checkin_dialog_math(app):
