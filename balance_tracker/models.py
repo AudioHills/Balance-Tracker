@@ -79,6 +79,8 @@ class RecurringItem:
     active: bool = True
     # scheduled-date ISO string -> amount in cents, or None to skip that occurrence
     overrides: dict = field(default_factory=dict)
+    # Debt id of the credit card this bill is charged to (paid off from chequing right away)
+    paid_with: str = ""
     id: str = field(default_factory=new_id)
 
     @property
@@ -117,6 +119,7 @@ class RecurringItem:
             notes=str(d.get("notes", "")),
             active=bool(d.get("active", True)),
             overrides=overrides,
+            paid_with=str(d.get("paid_with") or ""),
         )
 
 
@@ -206,6 +209,7 @@ class Settings:
     low_balance_threshold: int = 10000  # cents
     forecast_months: int = 6
     prompt_on_open: bool = True
+    reminder_time: str = "09:00"  # time of day for phone calendar reminders
     account_name: str = "Chequing"
     # Debt payoff plan
     debt_strategy: str = "avalanche"
@@ -237,6 +241,8 @@ class AppData:
     items: list = field(default_factory=list)  # list[RecurringItem]
     checkpoints: list = field(default_factory=list)  # list[Checkpoint]
     debts: list = field(default_factory=list)  # list[Debt]
+    # "item_id|YYYY-MM-DD" keys of card charges the user has marked as paid off
+    card_paid: list = field(default_factory=list)
     settings: Settings = field(default_factory=Settings)
 
     # ---- convenience -------------------------------------------------
@@ -281,6 +287,7 @@ class AppData:
             "items": [i.to_dict() for i in self.items],
             "checkpoints": [c.to_dict() for c in self.sorted_checkpoints()],
             "debts": [d.to_dict() for d in self.debts],
+            "card_paid": sorted(self.card_paid)[-500:],
         }
 
     @classmethod
@@ -293,5 +300,6 @@ class AppData:
             items=[RecurringItem.from_dict(i) for i in d.get("items", [])],
             checkpoints=[Checkpoint.from_dict(c) for c in d.get("checkpoints", [])],
             debts=[Debt.from_dict(x) for x in d.get("debts", [])],
+            card_paid=[str(k) for k in d.get("card_paid", [])],
             settings=Settings.from_dict(d.get("settings", {})),
         )

@@ -103,6 +103,10 @@ class DashboardPage:
     def __init__(self, ctx):
         self.ctx = ctx
         self.widget, lay, head = page_shell("Dashboard", "")
+        phone = QPushButton("📱 Reminders")
+        phone.setToolTip("Send payment reminders to your phone's calendar")
+        phone.clicked.connect(ctx.reminders)
+        head.addWidget(phone, 0, Qt.AlignTop)
         afford = QPushButton("Can I afford it?")
         afford.setToolTip("Ctrl+A")
         afford.clicked.connect(ctx.afford)
@@ -114,6 +118,17 @@ class DashboardPage:
 
         self.banner = Banner()
         lay.addWidget(self.banner)
+
+        # "Pay your card" to-do list for bills charged to a credit card
+        self.card_box = Card(spacing=6)
+        self.card_box.lay.addLayout(hbox(label("💳  Pay your card", "SectionTitle"), None,
+                                         label("Bills that landed on a credit card — pay them off and tick them",
+                                               "Hint")))
+        self.card_rows = QVBoxLayout()
+        self.card_rows.setSpacing(4)
+        self.card_box.lay.addLayout(self.card_rows)
+        self.card_box.hide()
+        lay.addWidget(self.card_box)
 
         grid = QGridLayout()
         grid.setSpacing(14)
@@ -181,6 +196,33 @@ class DashboardPage:
         bottom.addWidget(snap, 2)
         lay.addLayout(bottom)
 
+    def _refresh_cards(self, today: date):
+        from ..forecast import occurrences
+        data = self.ctx.data
+        due = []
+        for item in data.items:
+            card = data.debt(item.paid_with) if item.paid_with else None
+            if card is None:
+                continue
+            for o in occurrences(item, today - timedelta(days=14), today):
+                key = f"{item.id}|{o.date.isoformat()}"
+                if key not in data.card_paid:
+                    due.append((o, card, key))
+        due.sort(key=lambda t: t[0].date)
+        _clear_layout(self.card_rows)
+        self.card_box.setVisible(bool(due))
+        col = theme.colors()
+        for o, card, key in due:
+            when = nice_date(o.date, today)
+            late = o.date < today
+            txt = label(f"<b>{money.fmt(abs(o.amount))}</b> to {card.name} — {o.item.name} "
+                        f"<span style='color:{col['negative' if late else 'muted']}'>({when})</span>")
+            btn = QPushButton("✓ Paid")
+            btn.setObjectName("Chip")
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(lambda _=False, k=key: self.ctx.mark_card_paid(k))
+            self.card_rows.addLayout(hbox(txt, None, btn))
+
     def refresh(self):
         ctx, f, today = self.ctx, self.ctx.forecast, self.ctx.today
         s = ctx.data.settings
@@ -224,6 +266,8 @@ class DashboardPage:
                              "spent beyond your plan" if this < 0 else
                              "more than planned" if this > 0 else "Nothing unplanned so far",
                              "negative" if this < 0 else "positive")
+
+        self._refresh_cards(today)
 
         # alerts
         neg = f.first_below(0, today, horizon)
@@ -293,6 +337,15 @@ class DashboardPage:
             self.snap_tip.setText("Your bills are higher than your income on average — the forecast will trend down.")
         else:
             self.snap_tip.setText("")
+
+
+def _clear_layout(lay):
+    while lay.count():
+        it = lay.takeAt(0)
+        if it.widget():
+            it.widget().deleteLater()
+        elif it.layout():
+            _clear_layout(it.layout())
 
 
 def _when(d: date, today: date) -> str:
@@ -556,7 +609,9 @@ class ItemsPage:
             dim = None if i.active and nxt else "muted"
             t.setItem(r, 0, cell(("▲  " if i.kind == INCOME else "▼  ") + i.name, bold=True,
                                  color=dim or ("positive" if i.kind == INCOME else None), data=i.id))
-            t.setItem(r, 1, cell(i.category, color="muted"))
+            card = ctx.data.debt(i.paid_with) if i.paid_with else None
+            t.setItem(r, 1, cell(" · ".join(x for x in (i.category, f"💳 on {card.name}" if card else "") if x),
+                                 color="muted"))
             t.setItem(r, 2, cell(money.fmt(i.signed_amount, True), Qt.AlignRight,
                                  dim or ("positive" if i.kind == INCOME else None)))
             freq = FREQUENCIES[i.frequency]
@@ -751,6 +806,9 @@ class SettingsPage:
         restore = QPushButton("Restore")
         restore.clicked.connect(self.restore_auto)
         data.lay.addLayout(hbox(self.auto, restore, None))
+        rem = QPushButton("📱 Phone reminders…")
+        rem.clicked.connect(ctx.reminders)
+        data.lay.addLayout(hbox(rem, label("Export payment reminders to your phone's calendar.", "Hint"), None))
         reset = QPushButton("Erase all data…")
         reset.setObjectName("Danger")
         reset.clicked.connect(ctx.reset_all)
@@ -912,7 +970,8 @@ class DebtsPage:
 
         sched = Card()
         sched.lay.addWidget(label("Payment schedule · next 12 months", "SectionTitle"))
-        sched.lay.addWidget(label("Minimums plus the planned extra, by month.", "Hint"))
+        sched.lay.addWidget(label("Minimums plus the planned extra, by month · hover an amount for exact dates.",
+                                  "Hint"))
         self.schedule = table(["Month"], 0)
         self.schedule.setMinimumHeight(2 * 38 + 44)
         self.schedule.setStyleSheet("QTableView { border: none; }")
@@ -1105,12 +1164,24 @@ class DebtsPage:
             r = t.rowCount()
             t.insertRow(r)
             t.setItem(r, 0, cell(first.strftime("%B %Y"), bold=True))
+            nxt_month = add_months(first, 1, 1)
             for j, d in enumerate(live):
                 v = per.get(d.id)
-                t.setItem(r, j + 1, cell(money.fmt(v) if v else "—", Qt.AlignRight, None if v else "muted"))
+                c = cell(money.fmt(v) if v else "—", Qt.AlignRight, None if v else "muted")
+                tips = [f"{p.date.strftime('%a %b %d')}: {'extra' if p.extra else 'minimum'} {money.fmt(p.amount)}"
+                        for p in plan.payments if p.debt_id == d.id and first <= p.date < nxt_month]
+                if tips:
+                    c.setToolTip("\n".join(tips))
+                t.setItem(r, j + 1, c)
             t.setItem(r, len(live) + 1, cell(money.fmt(extra) if extra else "—", Qt.AlignRight,
                                              "positive" if extra else "muted"))
-            t.setItem(r, len(live) + 2, cell(money.fmt(sum(per.values())), Qt.AlignRight, bold=True))
+            t.setItem(r, len(live) + 2, cell(money.fmt(sum(per.values())) if per else "—", Qt.AlignRight,
+                                             None if per else "muted", bold=bool(per)))
+            if not per and r == 0:
+                t.item(r, 0).setToolTip("Nothing left to pay this month — due dates have already passed.")
+        if not rows:
+            t.insertRow(0)
+            t.setItem(0, 0, cell("No payments scheduled — add a debt with a balance above $0.", color="muted"))
         t.setFixedHeight(max(1, t.rowCount()) * 38 + 44)
 
 

@@ -105,3 +105,11 @@ def test_debt_roundtrip():
     again = AppData.from_dict(data.to_dict())
     assert again.debts[0].to_dict() == data.debts[0].to_dict()
     assert AppData.from_dict({"items": []}).debts == []
+
+
+def test_schedule_shows_months_when_this_months_due_date_passed():
+    t = date(2026, 10, 25)
+    plan = simulate([card("Visa", 300000, 20.0, due_day=20)], t, "avalanche", {})
+    rows = plan.month_rows(t, 12)
+    assert len(rows) == 12
+    assert rows[0][1] == {} and rows[1][1]  # nothing left in October, November has the payment

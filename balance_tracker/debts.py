@@ -73,6 +73,7 @@ class Plan:
     def month_rows(self, today: date, months: int = 12) -> list:
         """[(month_start, {debt_id: cents}, extra_cents)] for the schedule table."""
         start = today.replace(day=1)
+        last = max((p.date for p in self.payments), default=None)
         rows = []
         for m in range(months):
             first = add_months(start, m, 1)
@@ -84,9 +85,9 @@ class Plan:
                     per[p.debt_id] = per.get(p.debt_id, 0) + p.amount
                     if p.extra:
                         extra += p.amount
-            if not per:
-                break
-            rows.append((first, per, extra))
+            if last is None or first > last:
+                break  # everything is paid off
+            rows.append((first, per, extra))  # a month can be empty, e.g. this month's due date already passed
         return rows
 
 

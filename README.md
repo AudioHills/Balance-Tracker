@@ -43,6 +43,12 @@ monthly, yearly…), and Balance Tracker works out every future date and the run
   balance first, if you prefer) and sizes each month's extra payment so your chequing balance never
   drops below your cushion. It shows your debt-free date, interest saved, the order to pay things
   off, and a 12-month payment schedule. It can also add the payments to your day-by-day forecast.
+- **Credit-card bills:** set a bill's *Paid with* to a credit card if it's charged to the card and you
+  pay the card off right away. It shows as "Pay Visa: Netflix" in the forecast. Charges from the
+  last two weeks appear in a **Pay your card** list on the Dashboard, where you tick them off once paid.
+- **Phone reminders:** *📱 Reminders* exports a calendar file (.ics) with alerts for card charges,
+  debt payments, bills and paydays. Import it into Google Calendar, iPhone Calendar or Outlook,
+  and your phone reminds you even when the PC is off.
 - **Can I afford it?:** test a purchase on any date. It tells you whether you stay above your
   cushion and, if not, the first date it would fit.
 - **Calendar date pickers:** click any date box to pick a date from a calendar.

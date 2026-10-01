@@ -216,8 +216,12 @@ class Forecast:
     def _apply(self, occs, running: int) -> int:
         for o in occs:
             running += o.amount
+            desc = o.item.name
+            card = self.data.debt(o.item.paid_with) if o.item.paid_with else None
+            if card is not None:
+                desc = f"Pay {card.name}: {o.item.name}"
             self.entries.append(Entry(
-                o.date, "income" if o.amount >= 0 else "bill", o.item.name, o.amount, running,
+                o.date, "income" if o.amount >= 0 else "bill", desc, o.amount, running,
                 category=o.item.category, item_id=o.item.id or None, scheduled=o.scheduled,
                 overridden=o.overridden))
         return running

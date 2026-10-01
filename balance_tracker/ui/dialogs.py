@@ -80,6 +80,15 @@ class ItemDialog(BaseDialog):
         self.amount = MoneySpin()
         if item:
             self.amount.set_cents(item.amount)
+        self.paid_with = QComboBox()
+        self.paid_with.addItem("Chequing account", "")
+        for dbt in data.debts:
+            if dbt.kind != "loan":
+                self.paid_with.addItem(f"💳 {dbt.name} — I pay it off right away", dbt.id)
+        if item and item.paid_with:
+            self.paid_with.setCurrentIndex(max(0, self.paid_with.findData(item.paid_with)))
+        self.paid_with.setToolTip("Bills charged to a credit card show up as “Pay <card>” on the same day, "
+                                  "and can remind your phone to pay the card right away.")
         self.freq = QComboBox()
         for k, v in FREQUENCIES.items():
             self.freq.addItem(v, k)
@@ -114,6 +123,8 @@ class ItemDialog(BaseDialog):
         form.addRow("Type", hbox(self.btn_income, self.btn_bill, None))
         form.addRow("Name", self.name)
         form.addRow("Amount", hbox(self.amount, None))
+        self.paid_label = QLabel("Paid with")
+        form.addRow(self.paid_label, self.paid_with)
         form.addRow("How often", self.freq)
         self.start_label = QLabel("Date")
         form.addRow(self.start_label, hbox(self.start, None))
@@ -130,7 +141,7 @@ class ItemDialog(BaseDialog):
         self.outer.addWidget(self.preview)
         self.add_buttons("Save" if editing else "Add")
 
-        for sig in (self.freq.currentIndexChanged, self.start.dateChanged, self.second.valueChanged,
+        for sig in (self.btn_bill.toggled, self.freq.currentIndexChanged, self.start.dateChanged, self.second.valueChanged,
                     self.has_end.toggled, self.end.dateChanged, self.weekend.currentIndexChanged):
             sig.connect(self._refresh)
         self._refresh()
@@ -149,6 +160,7 @@ class ItemDialog(BaseDialog):
             category=self.category.currentText().strip(),
             notes=self.notes.toPlainText().strip(),
             active=self.active.isChecked(),
+            paid_with=(self.paid_with.currentData() or "") if self.btn_bill.isChecked() else "",
         )
         if self.item:
             it.id = self.item.id
@@ -156,6 +168,9 @@ class ItemDialog(BaseDialog):
         return it
 
     def _refresh(self):
+        show_card = self.btn_bill.isChecked() and self.paid_with.count() > 1
+        self.paid_with.setVisible(show_card)
+        self.paid_label.setVisible(show_card)
         f = self.freq.currentData()
         once = f == "once"
         self.start_label.setText("Date" if once else "First / next date")
@@ -578,4 +593,99 @@ class AffordDialog(BaseDialog):
         self.result_item = RecurringItem(
             name=self.name.text().strip() or "Planned purchase", amount=self.amount.cents(), kind=BILL,
             frequency="once", start_date=from_qdate(self.when.date()), category="Planned purchase")
+        super().accept()
+
+
+# --------------------------------------------------------------------------
+class RemindersDialog(BaseDialog):
+    """Export reminders as a calendar file the phone can import."""
+
+    def __init__(self, data: AppData, plan, today: date, parent=None):
+        from PySide6.QtCore import QTime
+        from PySide6.QtWidgets import QTimeEdit
+        super().__init__("Phone reminders 📱",
+                         "Save a calendar file and add it to your phone's calendar. Your phone will alert "
+                         "you — even when this computer is off.", parent)
+        self.data, self.plan, self.today = data, plan, today
+        self.setMinimumWidth(620)
+        has_cards = any(i.paid_with for i in data.items)
+        self.card = QCheckBox("Pay-your-card reminders for bills charged to a credit card")
+        self.card.setChecked(has_cards)
+        self.card.setEnabled(has_cards)
+        if not has_cards:
+            self.card.setToolTip("Edit a bill and set “Paid with” to a credit card to use this.")
+        self.debts = QCheckBox("Debt payment due dates from your payoff plan")
+        self.debts.setChecked(bool(plan and plan.payments))
+        self.debts.setEnabled(bool(plan and plan.payments))
+        self.bills = QCheckBox("Bills paid from chequing")
+        self.paydays = QCheckBox("Paydays")
+        self.time = QTimeEdit(QTime.fromString(data.settings.reminder_time, "HH:mm"))
+        self.time.setDisplayFormat("h:mm AP")
+        self.time.setButtonSymbols(QTimeEdit.NoButtons)
+        self.before = QSpinBox()
+        self.before.setRange(0, 7)
+        self.before.setValue(1)
+        self.before.setSpecialValueText("No")
+        self.before.setSuffix(" day(s) before")
+        self.months = QSpinBox()
+        self.months.setRange(1, 24)
+        self.months.setValue(6)
+        self.months.setSuffix(" months")
+        for w in (self.card, self.debts, self.bills, self.paydays):
+            self.outer.addWidget(w)
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight)
+        form.setVerticalSpacing(10)
+        form.addRow("Remind me at", hbox(self.time, None))
+        form.addRow("Heads-up", hbox(self.before, label("for debt payments and bills", "Hint"), None))
+        form.addRow("Cover the next", hbox(self.months, None))
+        self.outer.addLayout(form)
+        self.count = label("", "SectionTitle")
+        self.outer.addWidget(self.count)
+        self.outer.addWidget(self._howto(
+            "<b>Getting it onto your phone</b><br>"
+            "• <b>Google Calendar</b> (Android or iPhone): on a computer go to calendar.google.com → ⚙ Settings → "
+            "Import &amp; export → choose the file. Tip: create a calendar called “Bills” first and import into it.<br>"
+            "• <b>iPhone Calendar</b>: email the file to yourself, open the attachment on your iPhone → Add All.<br>"
+            "• <b>Outlook</b>: double-click the file, or Calendar → Add calendar → Upload from file.<br>"
+            "Re-export whenever your bills or plan change — events with the same ID are updated, not duplicated."))
+        bb = self.add_buttons("Save calendar file…")
+        for w in (self.card, self.debts, self.bills, self.paydays):
+            w.toggled.connect(self._refresh)
+        self.before.valueChanged.connect(self._refresh)
+        self.months.valueChanged.connect(self._refresh)
+        self._refresh()
+
+    @staticmethod
+    def _howto(html: str):
+        lb = label(html, "Hint", wrap=True)
+        lb.setMinimumHeight(lb.heightForWidth(572) + 8)
+        return lb
+
+    def _collect(self):
+        from ..reminders import collect
+        return collect(self.data, self.plan, self.today, self.months.value(), self.card.isChecked(),
+                       self.debts.isChecked(), self.bills.isChecked(), self.paydays.isChecked(),
+                       self.before.value())
+
+    def _refresh(self):
+        n = len(self._collect())
+        self.count.setText(f"{n} reminder{'s' if n != 1 else ''} will be added")
+
+    def accept(self):
+        from PySide6.QtWidgets import QFileDialog
+        from ..reminders import to_ics
+        items = self._collect()
+        if not items:
+            QMessageBox.information(self, "Nothing to export", "Tick at least one kind of reminder.")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save reminders", "BalanceTracker-reminders.ics",
+                                              "Calendar file (*.ics)")
+        if not path:
+            return
+        self.data.settings.reminder_time = self.time.time().toString("HH:mm")
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write(to_ics(items, self.data.settings.reminder_time))
+        self.saved_path = path
+        self.saved_count = len(items)
         super().accept()

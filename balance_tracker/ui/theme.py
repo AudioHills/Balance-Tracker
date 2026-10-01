@@ -146,11 +146,11 @@ QPushButton#Chip {{ border-radius: 14px; padding: 5px 12px; }}
 QPushButton#Chip:checked {{ background: {accent_soft}; color: {accent}; border-color: {accent}; }}
 
 /* ---------- inputs ---------- */
-QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit {{
+QLineEdit, QComboBox, QTimeEdit, QSpinBox, QDoubleSpinBox, QPlainTextEdit {{
     background: {surface}; border: 1px solid {border}; border-radius: 8px; padding: 6px 8px;
     selection-background-color: {selection};
 }}
-QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QPlainTextEdit:focus {{
+QLineEdit:focus, QComboBox:focus, QTimeEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QPlainTextEdit:focus {{
     border: 1px solid {accent};
 }}
 QComboBox::drop-down {{ border: none; width: 26px; }}

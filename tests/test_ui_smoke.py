@@ -139,3 +139,30 @@ def test_date_field_popup(app):
     assert f.date() == QDate(2026, 10, 15) and seen and not f._popup.isVisible()
     f.setMinimumDate(QDate(2026, 11, 1))
     assert f.date() == QDate(2026, 11, 1)
+
+
+def test_card_todo_and_reminders(app, tmp_path, monkeypatch):
+    from balance_tracker.models import Debt, RecurringItem
+    t = date.today()
+    data = AppData()
+    data.checkpoints.append(Checkpoint(t - timedelta(days=3), 300000))
+    visa = Debt("Visa", 50000, 20.0)
+    data.debts.append(visa)
+    data.items.append(RecurringItem("Netflix", 1899, BILL, "monthly", t - timedelta(days=1), paid_with=visa.id))
+    w = MainWindow(storage.Store(tmp_path), data)
+    dash = w.pages[0]
+    assert not dash.card_box.isHidden()
+    key = f"{data.items[0].id}|{(t - timedelta(days=1)).isoformat()}"
+    w.mark_card_paid(key)
+    assert key in w.data.card_paid and dash.card_box.isHidden()
+
+    out = tmp_path / "r.ics"
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName", lambda *a, **k: (str(out), ""))
+    dlg = dialogs.RemindersDialog(w.data, w.plan, t, w)
+    assert dlg.card.isChecked()
+    dlg.accept()
+    assert "Pay Visa" in out.read_text(encoding="utf-8")
+
+    # the item dialog offers the card under "Paid with"
+    idlg = dialogs.ItemDialog(w.data, w.data.items[0], parent=w)
+    assert idlg.paid_with.currentData() == visa.id

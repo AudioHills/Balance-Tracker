@@ -16,7 +16,7 @@ from ..debts import make_plan, plan_start
 from ..forecast import Forecast, projection_end
 from ..models import AppData, BILL, INCOME, Checkpoint, new_id
 from . import theme
-from .dialogs import AffordDialog, CheckInDialog, DebtDialog, ItemDialog, WelcomeDialog
+from .dialogs import AffordDialog, CheckInDialog, DebtDialog, ItemDialog, RemindersDialog, WelcomeDialog
 from .icon import app_icon
 from .pages import CheckinsPage, DashboardPage, DebtsPage, ItemsPage, LedgerPage, SettingsPage
 from .widgets import label
@@ -341,6 +341,16 @@ class MainWindow(QMainWindow):
             self.data.items.append(dlg.result_item)
             self.commit(toast=f"Added “{dlg.result_item.name}” as a one-time bill")
 
+    def reminders(self):
+        dlg = RemindersDialog(self.data, self.plan, self.today, self)
+        if dlg.exec():
+            self.commit(toast=f"Saved {dlg.saved_count} reminders — now import the file into your phone's calendar")
+
+    def mark_card_paid(self, key: str):
+        self.snapshot()
+        self.data.card_paid.append(key)
+        self.commit(toast="Marked as paid", undoable=True)
+
     def add_debt(self):
         dlg = DebtDialog(self.data, parent=self)
         if dlg.exec():
@@ -361,6 +371,9 @@ class MainWindow(QMainWindow):
         debt = self.data.debt(debt_id)
         self.snapshot()
         self.data.debts.remove(debt)
+        for item in self.data.items:
+            if item.paid_with == debt_id:
+                item.paid_with = ""
         self.commit(toast=f"Deleted “{debt.name}”", undoable=True)
 
     def delete_checkpoint(self, cp_id: str):
