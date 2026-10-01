@@ -137,3 +137,28 @@ def test_merge_matches_python(tmp_path):
                                      "debts": sorted(d["debts"], key=lambda x: x["id"]),
                                      "checkpoints": sorted(d["checkpoints"], key=lambda x: x["id"])}, sort_keys=True)
         assert norm(back) == norm(exp), f"merge scenario {k} differs"
+
+
+def test_reminders_match_python(tmp_path):
+    import re
+    from balance_tracker.reminders import collect, to_ics
+    rng = random.Random(11)
+    scenarios, expected = [], []
+    for k in range(30):
+        today = date(2026, 1, 1) + timedelta(days=rng.randint(0, 500))
+        data = rand_data(rng, today)
+        opts = dict(months=rng.choice([1, 3, 6]), card_charges=rng.random() < 0.8, debt_payments=rng.random() < 0.8,
+                    bills=rng.random() < 0.5, paydays=rng.random() < 0.5, days_before=rng.randint(0, 3))
+        at = rng.choice(["09:00", "07:30", "23:50"])
+        plan = make_plan(data, today) if data.debts else None
+        r = collect(data, plan, today, **opts)
+        expected.append({"reminders": [[x.uid, x.day.isoformat(), x.title, x.detail, x.days_before] for x in r],
+                         "ics": re.sub(r"DTSTAMP:\S+", "DTSTAMP:X", to_ics(r, at))})
+        js_opts = {"months": opts["months"], "cardCharges": opts["card_charges"], "debtPayments": opts["debt_payments"],
+                   "bills": opts["bills"], "paydays": opts["paydays"], "daysBefore": opts["days_before"]}
+        scenarios.append({"reminders": js_opts, "at": at, "data": data.to_dict(), "today": today.isoformat()})
+    got = run_node(tmp_path, scenarios)
+    assert sum(len(e["reminders"]) for e in expected) > 100  # the scenarios really produce reminders
+    for k, (exp, js) in enumerate(zip(expected, got)):
+        assert js["reminders"] == exp["reminders"], f"scenario {k}: reminders differ"
+        assert js["ics"] == exp["ics"], f"scenario {k}: calendar file differs"

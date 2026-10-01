@@ -199,3 +199,22 @@ def test_iphone_sync_roundtrip(app, tmp_path):
     assert w.sync_in(force=True) == 0  # nothing new
     w.go(5)
     app.processEvents()
+
+
+def test_hide_balance_eye(app, tmp_path):
+    t = date.today()
+    data = AppData()
+    data.checkpoints.append(Checkpoint(t, 123456))
+    store = storage.Store(tmp_path)
+    w = MainWindow(store, data)
+    dash = w.pages[0]
+    assert dash.c_today.value.text() == "$1,234.56"
+    dash.eye.click()
+    assert dash.c_today.value.text() == "******" and w.side_balance.text() == "******"
+    assert store.load().settings.hide_balance is True  # remembered
+    w2 = MainWindow(store, store.load())  # reopening the app keeps it hidden
+    assert w2.pages[0].c_today.value.text() == "******"
+    w2.side_eye.click()
+    assert w2.side_balance.text() == "$1,234.56"
+    from balance_tracker.sync import sync_payload
+    assert "hide_balance" not in sync_payload(store.load())  # a per-device choice, not synced

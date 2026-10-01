@@ -108,6 +108,8 @@ QToolTip {{ background: {surface2}; color: {text}; border: 1px solid {border}; p
 }}
 #NavButton:hover {{ background: {surface2}; color: {text}; }}
 #NavButton:checked {{ background: {accent_soft}; color: {accent}; }}
+QPushButton#EyeButton {{ border: none; background: transparent; padding: 0; border-radius: 8px; }}
+QPushButton#EyeButton:hover {{ background: {surface2}; }}
 QPushButton#ThemeToggle {{
     border-radius: 18px; padding: 0; font-size: 14pt; background: {surface2}; border: 1px solid {border};
 }}

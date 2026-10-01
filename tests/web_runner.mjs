@@ -4,6 +4,14 @@ import * as E from "../web/engine.js";
 
 const scenarios = JSON.parse(readFileSync(process.argv[2], "utf8"));
 const out = scenarios.map((sc) => {
+  if (sc.reminders) {
+    const data = E.normData(sc.data);
+    const today = E.toDay(sc.today);
+    const plan = data.debts.length ? E.makePlan(data, today) : null;
+    const r = E.collectReminders(data, plan, today, sc.reminders);
+    return { reminders: r.map((x) => [x.uid, E.toISO(x.day), x.title, x.detail, x.daysBefore]),
+      ics: E.toICS(r, sc.at).replace(/DTSTAMP:\S+/g, "DTSTAMP:X") };
+  }
   if (sc.merge) {
     const a = E.normData(sc.merge[0]), b = E.normData(sc.merge[1]);
     return { merged: E.merge(a, b) };

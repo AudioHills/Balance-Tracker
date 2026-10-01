@@ -28,7 +28,7 @@ PRIVATE_SETTINGS = ("email_enabled", "email_to", "smtp_host", "smtp_port", "smtp
                     "ntfy_enabled", "ntfy_topic", "notify_last_sent", "notify_task", "sync_enabled",
                     "sync_folder", "reminder_time", "notify_card", "notify_debts", "notify_bills",
                     "notify_paydays", "notify_low", "notify_days_before", "notify_time", "theme",
-                    "prompt_on_open")
+                    "prompt_on_open", "hide_balance")
 
 
 def now_utc() -> str:

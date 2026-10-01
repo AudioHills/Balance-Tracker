@@ -18,7 +18,7 @@ from ..forecast import monthly_equivalent, next_occurrence, add_months, horizon_
 from ..models import BILL, FREQUENCIES, INCOME
 from . import theme
 from .dialogs import date_edit, from_qdate, to_qdate
-from .widgets import Banner, BalanceChart, Card, MonthlyBars, MoneySpin, StatCard, hbox, label
+from .widgets import MASK, Banner, BalanceChart, Card, EyeButton, MonthlyBars, MoneySpin, StatCard, hbox, label
 
 
 def escape_html(text: str) -> str:
@@ -138,6 +138,9 @@ class DashboardPage:
         grid = QGridLayout()
         grid.setSpacing(14)
         self.c_today = StatCard("BALANCE TODAY")
+        self.eye = EyeButton()
+        self.eye.clicked.connect(ctx.toggle_balance)
+        self.c_today.title_row.addWidget(self.eye)
         self.c_safe = StatCard("SAFE TO SPEND")
         self.c_low = StatCard("LOWEST POINT AHEAD")
         self.c_unplanned = StatCard("UNPLANNED THIS MONTH")
@@ -246,8 +249,10 @@ class DashboardPage:
         last = ctx.data.latest_checkpoint
         days_ago = (today - last.date).days
         ago = "today" if days_ago == 0 else "yesterday" if days_ago == 1 else f"{days_ago} days ago"
-        self.c_today.set(money.fmt(bal), f"Last checked in {ago}",
-                         bal_color(bal, s.low_balance_threshold) if bal is not None else None)
+        hidden = s.hide_balance
+        self.eye.set_state(hidden)
+        self.c_today.set(MASK if hidden else money.fmt(bal), f"Last checked in {ago}",
+                         None if hidden or bal is None else bal_color(bal, s.low_balance_threshold))
 
         safe = f.safe_to_spend(today, 30, s.low_balance_threshold)
         if safe is None:
@@ -279,12 +284,13 @@ class DashboardPage:
         below = f.first_below(s.low_balance_threshold, today, horizon)
         if neg:
             self.banner.show_message(
-                f"⚠  Heads up: you're projected to be in overdraft ({money.fmt(neg[1])}) "
+                f"⚠  Heads up: you're projected to be in overdraft"
+                f"{'' if hidden else f' ({money.fmt(neg[1])})'} "
                 f"{_when(neg[0], today)}. Consider moving a bill or trimming spending.", "negative")
         elif below and s.low_balance_threshold > 0:
             self.banner.show_message(
                 f"Your balance dips below your {money.fmt(s.low_balance_threshold)} cushion "
-                f"{_when(below[0], today)} ({money.fmt(below[1])}).", "warning")
+                f"{_when(below[0], today)}{'' if hidden else f' ({money.fmt(below[1])})'}.", "warning")
         elif days_ago >= 7:
             self.banner.show_message(
                 f"It's been {days_ago} days since your last check-in — a quick update keeps the forecast honest.",

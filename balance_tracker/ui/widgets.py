@@ -39,13 +39,57 @@ class Card(QFrame):
         self.setGraphicsEffect(shadow)
 
 
+def eye_icon(is_open: bool, color: str, size: int = 18) -> QIcon:
+    """Open eye = balance showing; eye with a slash = balance hidden."""
+    s = size * 2
+    pm = QPixmap(s, s)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    pen = QPen(QColor(color), s * 0.08, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.NoBrush)
+    path = QPainterPath(QPointF(s * 0.08, s * 0.5))
+    path.quadTo(QPointF(s * 0.5, s * 0.08), QPointF(s * 0.92, s * 0.5))
+    path.quadTo(QPointF(s * 0.5, s * 0.92), QPointF(s * 0.08, s * 0.5))
+    p.drawPath(path)
+    p.drawEllipse(QPointF(s * 0.5, s * 0.5), s * 0.13, s * 0.13)
+    if not is_open:
+        p.drawLine(QPointF(s * 0.16, s * 0.84), QPointF(s * 0.84, s * 0.16))
+    p.end()
+    return QIcon(pm)
+
+
+class EyeButton(QPushButton):
+    """Small flat button that shows/hides a balance."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("EyeButton")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedSize(30, 26)
+        self.setIconSize(QSize(18, 18))
+        self.set_state(False)
+
+    def set_state(self, hidden: bool):
+        self.setIcon(eye_icon(not hidden, theme.colors()["muted"]))
+        self.setToolTip("Show balance" if hidden else "Hide balance")
+
+
+MASK = "******"
+
+
 class StatCard(Card):
     def __init__(self, title: str, parent=None):
         super().__init__(parent, padding=16, spacing=4)
         self.title = label(title, "StatTitle")
         self.value = label("—", "StatValue")
         self.sub = label("", "StatSub", wrap=True)
-        for w in (self.title, self.value, self.sub):
+        self.title_row = QHBoxLayout()
+        self.title_row.setContentsMargins(0, 0, 0, 0)
+        self.title_row.addWidget(self.title, 1)
+        self.lay.addLayout(self.title_row)
+        for w in (self.value, self.sub):
             self.lay.addWidget(w)
         self.lay.addStretch(1)
         self.setMinimumWidth(170)

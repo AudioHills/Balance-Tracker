@@ -57,6 +57,8 @@ monthly, yearly…), and Balance Tracker works out every future date and the run
   Calendar, iPhone Calendar or Outlook, so reminders fire from your phone even when the PC is off.
 - **Can I afford it?:** test a purchase on any date. It tells you whether you stay above your
   cushion and, if not, the first date it would fit.
+- **Hide balance:** click the 👁 eye next to *Balance today* to show it as `******`, for when someone
+  is looking over your shoulder. Each device remembers its own choice.
 - **Calendar date pickers:** click any date box to pick a date from a calendar.
 - **Keyboard shortcuts:** `Ctrl+1…6` switch pages, `Ctrl+K` check in, `Ctrl+I` add income,
   `Ctrl+B` add bill, `Ctrl+D` add debt, `Ctrl+A` "Can I afford it?".

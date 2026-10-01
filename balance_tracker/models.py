@@ -235,6 +235,7 @@ class Settings:
     # iPhone sync through iCloud Drive
     sync_enabled: bool = False
     sync_folder: str = ""
+    hide_balance: bool = False  # eye toggle: show today's balance as ******
     account_name: str = "Chequing"
     # Debt payoff plan
     debt_strategy: str = "avalanche"

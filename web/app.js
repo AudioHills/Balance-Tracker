@@ -10,6 +10,10 @@ const $ = (s, r = document) => r.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const clone = (x) => JSON.parse(JSON.stringify(x));
 
+const EYE_OPEN = `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>`;
+const EYE_SHUT = `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/><path d="M4 20 20 4"/></svg>`;
+const MASK = "******";
+const balanceHidden = () => localStorage.getItem("bt-hide-balance") === "1";
 let data, saved, meta, today, plan, fc;
 let tab = "home";
 let locked = L.enabled();
@@ -112,6 +116,7 @@ function render() {
   const views = { home: viewHome, days: viewDays, bills: viewBills, debts: viewDebts, more: viewMore };
   $("#app").innerHTML = views[tab]();
   if (tab === "home") mountChart();
+  if (tab === "debts") mountDebtChart();
 }
 
 // ---------- home
@@ -125,8 +130,10 @@ function viewHome() {
   const horizon = E.horizonEnd(data, today);
   let html = topbar(s.account_name);
 
-  html += `<div class="card hero"><div class="label">Balance today</div>
-    <div class="big num ${tone(bal)}">${money(bal)}</div>
+  const hide = balanceHidden();
+  html += `<div class="card hero"><div class="label-row"><span class="label">Balance today</span>
+    <button class="eye" data-act="eye" aria-label="${hide ? "Show balance" : "Hide balance"}">${hide ? EYE_SHUT : EYE_OPEN}</button></div>
+    <div class="big num ${hide ? "" : tone(bal)}">${hide ? MASK : money(bal)}</div>
     <div class="muted small">Last checked in ${agoText}</div>
     <div class="actions"><button class="btn primary grow" data-act="checkin">Check in balance</button>
     <button class="btn grow" data-act="afford">Can I afford it?</button></div></div>`;
@@ -134,8 +141,9 @@ function viewHome() {
   const neg = fc.firstBelow(0, today, horizon);
   const below = fc.firstBelow(s.low_balance_threshold, today, horizon);
   const when = (d) => (d === today ? "today" : d === today + 1 ? "tomorrow" : "on " + longDate(d));
-  if (neg) html += `<div class="banner negative">⚠ You're projected to be in overdraft (${money(neg[1])}) ${when(neg[0])}.</div>`;
-  else if (below && s.low_balance_threshold > 0) html += `<div class="banner warning">Balance dips below your ${money(s.low_balance_threshold)} cushion ${when(below[0])} (${money(below[1])}).</div>`;
+  const amt = (v) => (hide ? "" : ` (${money(v)})`);
+  if (neg) html += `<div class="banner negative">⚠ You're projected to be in overdraft${amt(neg[1])} ${when(neg[0])}.</div>`;
+  else if (below && s.low_balance_threshold > 0) html += `<div class="banner warning">Balance dips below your ${money(s.low_balance_threshold)} cushion ${when(below[0])}${amt(below[1])}.</div>`;
   else if (ago >= 7) html += `<div class="banner warning">It's been ${ago} days since your last check-in.</div>`;
 
   const safe = fc.safeToSpend(today, 30, s.low_balance_threshold);
@@ -342,6 +350,10 @@ function viewDebts() {
   html += `<div class="stats"><div class="stat"><div class="t">Total owed</div><div class="v num neg">${moneyShort(total)}</div><div class="s">${moneyShort(interest)}/mo interest</div></div>
     <div class="stat"><div class="t">Debt-free</div><div class="v ${plan.debtFree ? "pos" : "neg"}">${plan.debtFree ? fmtDate(plan.debtFree, { month: "short", year: "2-digit" }) : "10+ yrs"}</div><div class="s">${plan.debtFree ? monthsAway(plan.debtFree) : "not on track"}</div></div>
     <div class="stat"><div class="t">Saved</div><div class="v num pos">${moneyShort(Math.max(0, mins.totalInterest - plan.totalInterest))}</div><div class="s">interest vs mins</div></div></div>`;
+  const stale = data.debts.filter((d) => today - E.toDay(d.updated_on) > 35);
+  const never = data.debts.filter((d) => d.balance > 0 && !mins.payoff.has(d.id));
+  if (stale.length) html += `<div class="banner warning">Update your balance for ${esc(stale.map((d) => d.name).join(", "))} — it's been over a month. Tap a debt below to update it from your latest statement.</div>`;
+  else if (never.length && !plan.debtFree) html += `<div class="banner warning">${esc(never.map((d) => d.name).join(", "))}: the minimum payment only covers interest. Extra payments are the only way to bring this down.</div>`;
   const nxt = plan.nextExtra(today);
   html += `<div class="banner info">${nxt ? `👉 Next: pay <b>${money(nxt.amount)}</b> extra to <b>${esc(E.findDebt(data, nxt.debt_id)?.name)}</b> on ${longDate(nxt.date)} (on top of the minimum).`
     : s.debt_mode === "auto" ? "No spare money right now — keep paying the minimums. Extra kicks in as soon as your forecast has room above your cushion." : "Set a fixed extra amount below to speed things up."}</div>`;
@@ -354,6 +366,7 @@ function viewDebts() {
       <div class="field toggle-row"><label>Show payments in Day by day</label><label class="switch"><input type="checkbox" data-change="dinfc" ${s.debt_in_forecast ? "checked" : ""}><span></span></label></div>
     </div></div>`;
 
+  html += `<div class="card"><h2>Total debt over time</h2><div class="chart" id="debtchart"></div></div>`;
   const order = new Map(plan.order.map((id, i) => [id, i + 1]));
   html += `<div class="dayhead"><span>Pay off in this order</span></div><div class="list">`;
   for (const d of [...data.debts].sort((a, b) => (order.get(a.id) ?? 99) - (order.get(b.id) ?? 99))) {
@@ -399,10 +412,12 @@ function viewMore() {
     <div class="row tap" data-act="sync"><div class="badge ci">⟳</div><div class="main"><div class="title">Sync with my PC</div><div class="sub">${meta.lastSync ? "Last synced " + new Date(meta.lastSync).toLocaleString() : "Through iCloud Drive"}${meta.unsent ? " · changes to send" : ""}</div></div><div class="muted">›</div></div>
     <div class="row tap" data-act="history"><div class="badge ci">✓</div><div class="main"><div class="title">Check-in history</div><div class="sub">${checkins.length} check-ins · ${money(Math.abs(thisM))} ${thisM < 0 ? "unplanned" : "ahead"} this month</div></div><div class="muted">›</div></div>
     <div class="row tap" data-act="afford"><div class="badge">?</div><div class="main"><div class="title">Can I afford it?</div></div><div class="muted">›</div></div>
+    <div class="row tap" data-act="calendar"><div class="badge">📅</div><div class="main"><div class="title">Reminders in my Calendar</div><div class="sub">Pay-your-card, debt payments, bills, paydays</div></div><div class="muted">›</div></div>
     <div class="row tap" data-act="settings"><div class="badge">⚙</div><div class="main"><div class="title">Settings</div><div class="sub">Cushion, theme, account name</div></div><div class="muted">›</div></div>
   </div><div class="list">
     <div class="row tap" data-act="export"><div class="badge">⇪</div><div class="main"><div class="title">Export a backup</div></div></div>
     <div class="row tap" data-act="import"><div class="badge">⇩</div><div class="main"><div class="title">Import a backup</div></div></div>
+    <div class="row tap" data-act="csv"><div class="badge">▦</div><div class="main"><div class="title">Export day-by-day (CSV)</div><div class="sub">Opens in Numbers or Excel</div></div></div>
   </div><p class="hint">Your data is stored only on this phone (and in your iCloud Drive when you sync). Balance Tracker never sends it anywhere else.</p>`;
   return html;
 }
@@ -497,10 +512,12 @@ function sheetItem(id = null, kind = "bill") {
     ${field("Ends", `<input type="date" id="it_end" value="${i.end_date || E.toISO(today + 365)}">`, "it-end")}
     ${field("On weekends", `<select id="it_wk">${opts(E.WEEKEND_RULES, i.weekend_rule)}</select>`)}
     ${field("Category", `<input id="it_cat" list="cats" value="${esc(i.category)}" placeholder="Optional"><datalist id="cats">${cats.map((c) => `<option value="${esc(c)}">`).join("")}</datalist>`)}
-    ${toggle("Include in forecast", "it_active", i.active)}</div>
+    ${toggle("Include in forecast", "it_active", i.active)}
+    <div class="field stack"><label>Notes</label><textarea id="it_notes" placeholder="Optional">${esc(i.notes)}</textarea></div></div>
     <div class="hint" id="it_preview"></div>
     <button class="btn primary block" data-act="saveitem" data-id="${esc(id || "")}">${id ? "Save" : "Add"}</button>
-    ${id ? `<button class="btn danger block" style="margin-top:10px" data-act="delitem" data-id="${esc(id)}">Delete</button>` : ""}`;
+    ${id ? `<button class="btn block" style="margin-top:10px" data-act="dupitem" data-id="${esc(id)}">Duplicate</button>
+      <button class="btn danger block" style="margin-top:10px" data-act="delitem" data-id="${esc(id)}">Delete</button>` : ""}`;
   openSheet(id ? "Edit" : kind === "income" ? "Add income" : "Add bill", body, (s) => {
     const upd = () => {
       const f = val("it_freq");
@@ -532,6 +549,7 @@ function readItem(id) {
     end_date: checked("it_hasend") && val("it_freq") !== "once" ? val("it_end") : null,
     second_day: Number(val("it_second") || 31), weekend_rule: val("it_wk"), category: val("it_cat").trim(),
     active: checked("it_active"), paid_with: kind === "bill" ? val("it_card") : "", overrides: old?.overrides || {},
+    notes: val("it_notes").trim(),
   });
 }
 
@@ -548,11 +566,27 @@ function sheetDebt(id = null) {
     ${field("Minimum $", `<input id="db_minamt" inputmode="decimal" value="${moneyInput(d.min_amount)}" placeholder="0.00">`)}
     ${field("or % of balance", `<input id="db_minpct" inputmode="decimal" value="${d.min_percent || ""}" placeholder="0">`)}
     ${toggle("Plus that month's interest", "db_plus", d.min_plus_interest)}
-    ${field("Already a bill?", `<select id="db_link"><option value="">No</option>${bills.map((b) => `<option value="${esc(b.id)}" ${d.linked_bill_id === b.id ? "selected" : ""}>${esc(b.name)}</option>`).join("")}</select>`)}</div>
+    ${field("Already a bill?", `<select id="db_link"><option value="">No</option>${bills.map((b) => `<option value="${esc(b.id)}" ${d.linked_bill_id === b.id ? "selected" : ""}>${esc(b.name)}</option>`).join("")}</select>`)}
+    <div class="field stack"><label>Notes</label><textarea id="db_notes" placeholder="Optional">${esc(d.notes)}</textarea></div></div>
+    <div class="hint" id="db_info"></div>
     <p class="hint">If you already added this payment under Bills, pick it in “Already a bill?” so it isn't counted twice.</p>
     <button class="btn primary block" data-act="savedebt" data-id="${esc(id || "")}">${id ? "Save" : "Add debt"}</button>
     ${id ? `<button class="btn danger block" style="margin-top:10px" data-act="deldebt" data-id="${esc(id)}">Delete</button>` : ""}`;
-  openSheet(id ? "Edit debt" : "Add a debt", body);
+  openSheet(id ? "Edit debt" : "Add a debt", body, (s) => {
+    const upd = () => {
+      const tmp = E.normDebt({ balance: parseMoney(val("db_bal")), apr: parseFloat(val("db_apr")) || 0, min_amount: parseMoney(val("db_minamt")),
+        min_percent: parseFloat(val("db_minpct")) || 0, min_plus_interest: checked("db_plus") });
+      const interest = (tmp.balance * tmp.apr) / 1200;
+      const mp = E.minimumPayment(tmp, tmp.balance + interest, interest);
+      const warn = tmp.balance && mp <= interest + 0.5;
+      const el = $("#db_info", s);
+      el.textContent = `Interest this month ≈ ${money(E.pyRound(interest))} · minimum ≈ ${money(E.pyRound(mp))}` +
+        (warn ? " — ⚠ the minimum only covers interest, so this balance would never go down." : "");
+      el.className = "hint" + (warn ? " warn" : "");
+    };
+    s.querySelectorAll("input,select").forEach((el) => { el.addEventListener("input", upd); el.addEventListener("change", upd); });
+    upd();
+  });
 }
 function saveDebt(id) {
   const old = id ? E.findDebt(data, id) : null;
@@ -562,6 +596,7 @@ function saveDebt(id) {
     apr: parseFloat(val("db_apr")) || 0, credit_limit: parseMoney(val("db_limit")), due_day: Number(val("db_due")),
     min_amount: parseMoney(val("db_minamt")), min_percent: parseFloat(val("db_minpct")) || 0, min_plus_interest: checked("db_plus"),
     linked_bill_id: val("db_link"), updated_on: old && old.balance === bal ? old.updated_on : E.toISO(today),
+    notes: val("db_notes").trim(),
   });
   if (old) data.debts[data.debts.indexOf(old)] = d; else data.debts.push(d);
   closeSheet();
@@ -607,7 +642,15 @@ function sheetHistory() {
   const months = [];
   for (let k = 5; k >= 0; k--) { const m = E.ymd(E.addMonths(E.fromYMD(E.ymd(today).y, E.ymd(today).m, 1), -k, 1)); months.push([m, um.get(`${m.y}-${m.m}`) || 0]); }
   const top = Math.max(1, ...months.map(([, v]) => Math.abs(v)));
-  let body = `<div class="card"><h2>Unplanned spending by month</h2><div class="bars">${months.map(([m, v]) =>
+  const thisM = um.get(`${E.ymd(today).y}-${E.ymd(today).m}`) || 0;
+  const tracked = months.slice(0, 5).map(([, v], i) => [v, um.has(`${months[i][0].y}-${months[i][0].m}`)]).filter(([, has]) => has).map(([v]) => v);
+  const avg = tracked.length ? Math.trunc(tracked.reduce((a, b) => a + b, 0) / tracked.length) : null;
+  let total = 0; um.forEach((v) => (total += v));
+  const show = (v) => (v === null ? "—" : `<span class="${v < 0 ? "neg" : "pos"}">${money(Math.abs(v))}</span>`);
+  let body = `<div class="stats"><div class="stat"><div class="t">This month</div><div class="v num">${show(thisM)}</div><div class="s">${thisM < 0 ? "over plan" : "ahead"}</div></div>
+    <div class="stat"><div class="t">Monthly avg</div><div class="v num">${show(avg)}</div><div class="s">${avg === null ? "needs a full month" : `last ${tracked.length} mo`}</div></div>
+    <div class="stat"><div class="t">Since start</div><div class="v num">${show(total)}</div><div class="s">${fc.checkins().length} check-ins</div></div></div>
+    <div class="card"><h2>Unplanned spending by month</h2><div class="bars">${months.map(([m, v]) =>
     `<div class="b"><span class="${v < 0 ? "neg" : v > 0 ? "pos" : ""}">${v ? moneyShort(Math.abs(v)) : "—"}</span><i style="height:${(Math.abs(v) / top) * 80}%;background:var(${v < 0 ? "--negative" : v > 0 ? "--positive" : "--border"})"></i><span>${fmtDate(E.fromYMD(m.y, m.m, 1), { month: "short" })}</span></div>`).join("")}</div></div><div class="list">`;
   for (const e of [...fc.checkins()].reverse()) {
     body += `<div class="row tap" data-act="delcheckin" data-cp="${esc(e.checkpoint_id)}"><div class="main"><div class="title">${niceDate(e.date)}</div>
@@ -724,6 +767,69 @@ function delCheckpoint(id) {
   save("Check-in deleted", true);
 }
 
+// ---------- total debt chart
+function mountDebtChart() {
+  const el = $("#debtchart");
+  if (!el || !plan || !plan.totals.length) return;
+  const total0 = data.debts.reduce((a, d) => a + d.balance, 0);
+  const pts = [[today, total0], ...plan.totals];
+  const hi = Math.max(...pts.map((p) => p[1]), 1);
+  const W = 1000, H = 170, n = pts.length;
+  const x = (i) => (i / (n - 1 || 1)) * W, y = (v) => H - (v / hi) * (H - 10);
+  let path = `M0,${y(pts[0][1])}`;
+  pts.slice(1).forEach(([, v], k) => { path += `L${x(k + 1)},${y(pts[k][1])}L${x(k + 1)},${y(v)}`; });
+  const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim();
+  const years = pts.map(([d], i) => [d, i]).filter(([d], i) => i && E.ymd(d).m === 12);
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H + 20}" preserveAspectRatio="none">
+    <defs><linearGradient id="dg" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="${accent}" stop-opacity=".28"/><stop offset="1" stop-color="${accent}" stop-opacity="0"/></linearGradient></defs>
+    <path d="${path}L${W},${H}L0,${H}Z" fill="url(#dg)"/>
+    <path d="${path}" fill="none" stroke="${accent}" stroke-width="2.4" vector-effect="non-scaling-stroke" stroke-linejoin="round"/></svg>
+    <span class="tiny muted" style="position:absolute;top:-2px;left:4px">${moneyShort(hi)}</span>
+    <span class="tiny muted" style="position:absolute;bottom:0;left:4px">Now</span>
+    <span class="tiny muted" style="position:absolute;bottom:0;right:4px">${plan.debtFree ? fmtDate(plan.debtFree, { month: "short", year: "numeric" }) : "10 yrs"}</span>
+    ${years.map(([d, i]) => `<span class="tiny muted" style="position:absolute;bottom:0;left:calc(${(i / (n - 1)) * 100}% - 14px)">${E.ymd(d).y + 1}</span>`).join("")}`;
+}
+
+// ---------- calendar reminders
+function sheetCalendar() {
+  const hasCards = data.items.some((i) => i.paid_with);
+  const hasPlan = !!(plan && plan.payments.length);
+  const body = `<p class="hint" style="padding-top:0">Adds alerts to your iPhone Calendar, so you get reminded even when Balance Tracker is closed.</p>
+    <div class="form">${toggle("Pay-your-card reminders", "ca_card", hasCards)}
+    ${toggle("Debt payments from your plan", "ca_debt", hasPlan)}
+    ${toggle("Bills paid from chequing", "ca_bills", false)}
+    ${toggle("Paydays", "ca_pay", false)}
+    ${field("Remind me at", `<input type="time" id="ca_time" value="${esc(localStorage.getItem("bt-remind-at") || "09:00")}">`)}
+    ${field("Heads-up", `<select id="ca_before">${[[0, "Day of only"], [1, "1 day before"], [2, "2 days before"], [3, "3 days before"]].map(([v, t]) => `<option value="${v}" ${v === 1 ? "selected" : ""}>${t}</option>`).join("")}</select>`)}
+    ${field("Cover the next", `<select id="ca_months">${[1, 3, 6, 12].map((m) => `<option value="${m}" ${m === 6 ? "selected" : ""}>${m} month${m > 1 ? "s" : ""}</option>`).join("")}</select>`)}</div>
+    <div class="result" id="ca_count"></div>
+    <button class="btn primary block" data-act="calexport">Add to Calendar</button>
+    <p class="hint" style="margin-top:12px">Your iPhone shows the events — tap <b>Add All</b>. Tip: in the Calendar app, make a calendar called “Bills” first and choose it when adding.
+    Re-add whenever your bills change; matching events update instead of doubling up in calendars that support it.</p>`;
+  openSheet("Calendar reminders", body, (s) => {
+    const upd = () => { $("#ca_count", s).innerHTML = `<div class="bold">${calendarItems().length} reminders</div>`; };
+    s.querySelectorAll("input,select").forEach((el) => el.addEventListener("change", upd));
+    upd();
+  });
+}
+function calendarItems() {
+  return E.collectReminders(data, plan, today, { months: Number(val("ca_months") || 6), cardCharges: checked("ca_card"),
+    debtPayments: checked("ca_debt"), bills: checked("ca_bills"), paydays: checked("ca_pay"), daysBefore: Number(val("ca_before") || 0) });
+}
+async function exportCalendar() {
+  const items = calendarItems();
+  if (!items.length) { toast("Turn on at least one kind of reminder"); return; }
+  const at = val("ca_time") || "09:00";
+  localStorage.setItem("bt-remind-at", at);
+  const file = new File([E.toICS(items, at)], "BalanceTracker-reminders.ics", { type: "text/calendar" });
+  download(file); // Safari hands .ics files to Calendar ("Add All")
+  toast(`${items.length} reminders ready — tap Add All`);
+}
+async function shareFile(file) {
+  try { if (navigator.canShare && navigator.canShare({ files: [file] })) await navigator.share({ files: [file] }); else download(file); }
+  catch (e) { if (e.name !== "AbortError") toast(e.message); }
+}
+
 // ------------------------------------------------------------------ app lock
 function renderLock() {
   closeSheet();
@@ -797,6 +903,20 @@ document.addEventListener("click", async (ev) => {
   const ds = t.dataset;
   switch (ds.act) {
     case "close": closeSheet(); break;
+    case "eye": localStorage.setItem("bt-hide-balance", balanceHidden() ? "0" : "1"); render(); break;
+    case "calendar": sheetCalendar(); break;
+    case "calexport": await exportCalendar(); break;
+    case "csv": {
+      const a = Math.max(fc.start ?? today, today - 30), b = Math.min(today + 180, fc.end);
+      await shareFile(new File([E.ledgerCSV(fc.entriesBetween(a, b))], `balance-forecast-${E.toISO(today)}.csv`, { type: "text/csv" }));
+      break;
+    }
+    case "dupitem": {
+      const src = E.findItem(data, ds.id);
+      const copy = E.normItem({ ...clone(src), id: undefined, name: src.name + " (copy)", updated: "" });
+      data.items.push(copy);
+      closeSheet(); save("Duplicated"); sheetItem(copy.id); break;
+    }
     case "faceid": await tryFaceId(); break;
     case "pinunlock": await pinUnlock(); break;
     case "forgot": {

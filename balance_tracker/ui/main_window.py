@@ -21,7 +21,7 @@ from .dialogs import (
 )
 from .icon import app_icon
 from .pages import CheckinsPage, DashboardPage, DebtsPage, ItemsPage, LedgerPage, SettingsPage
-from .widgets import label
+from .widgets import hbox, label
 
 
 class Toast(QFrame):
@@ -168,9 +168,12 @@ class MainWindow(QMainWindow):
         bl.setContentsMargins(14, 12, 14, 12)
         bl.setSpacing(2)
         self.side_label = label("", "SidebarBalanceLabel")
+        from .widgets import EyeButton
+        self.side_eye = EyeButton()
+        self.side_eye.clicked.connect(self.toggle_balance)
         self.side_balance = label("—", "SidebarBalance")
         self.side_next = label("", "Hint", wrap=True)
-        bl.addWidget(self.side_label)
+        bl.addLayout(hbox(self.side_label, None, self.side_eye, spacing=4))
         bl.addWidget(self.side_balance)
         bl.addWidget(self.side_next)
         v.addWidget(box)
@@ -181,6 +184,10 @@ class MainWindow(QMainWindow):
         ci.clicked.connect(self.check_in)
         v.addWidget(ci)
         return side
+
+    def toggle_balance(self):
+        self.data.settings.hide_balance = not self.data.settings.hide_balance
+        self.commit()
 
     def toggle_theme(self):
         self.data.settings.theme = "light" if theme.is_dark() else "dark"
@@ -225,9 +232,12 @@ class MainWindow(QMainWindow):
         f, s = self.forecast, self.data.settings
         self.side_label.setText(f"{s.account_name.upper()} · TODAY")
         bal = f.balance_on(self.today)
-        self.side_balance.setText(money.fmt(bal))
+        from .widgets import MASK
+        self.side_eye.set_state(s.hide_balance)
+        self.side_balance.setText(MASK if s.hide_balance else money.fmt(bal))
         col = theme.colors()
-        tone = "text" if bal is None or bal >= s.low_balance_threshold else ("warning" if bal >= 0 else "negative")
+        tone = "text" if s.hide_balance or bal is None or bal >= s.low_balance_threshold else \
+            ("warning" if bal >= 0 else "negative")
         self.side_balance.setStyleSheet(f"color: {col[tone]};")
         nxt = f.next_income(self.today) if not f.empty else None
         self.side_next.setText(f"Next income {nxt.date.strftime('%b %d')} · {money.fmt(nxt.amount)}" if nxt else "")

@@ -527,3 +527,99 @@ export function sameData(a, b) {
   const strip = (d) => { const { saved_at, device, ...rest } = d; return canon(rest); };
   return strip(a) === strip(b);
 }
+
+// ---------------------------------------------------------------- reminders (.ics)
+// Port of balance_tracker/reminders.py — cross-checked in tests/test_web_engine.py.
+export function fmtMoney(cents, symbol = "$", signed = false) {
+  const body = symbol + (Math.abs(cents) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return cents < 0 ? "−" + body : signed && cents > 0 ? "+" + body : body;
+}
+const cpCmp = (a, b) => { const A = Array.from(a), B = Array.from(b);
+  for (let i = 0; i < Math.min(A.length, B.length); i++) { const d = A[i].codePointAt(0) - B[i].codePointAt(0); if (d) return d; }
+  return A.length - B.length; };
+
+export function collectReminders(data, plan, today, { months = 6, cardCharges = true, debtPayments = true, bills = false,
+  paydays = false, daysBefore = 1 } = {}) {
+  const sym = data.settings.currency_symbol || "$";
+  const end = addMonths(today, months);
+  const out = [];
+  for (const item of data.items) {
+    const card = item.paid_with ? findDebt(data, item.paid_with) : null;
+    const want = (card && cardCharges) || (!card && item.kind !== "income" && bills) || (item.kind === "income" && paydays);
+    if (!want) continue;
+    for (const o of occurrences(item, today, end)) {
+      const amt = fmtMoney(Math.abs(o.amount), sym);
+      const iso = toISO(o.date);
+      if (card) out.push({ uid: `card-${item.id}-${iso}`, day: o.date, title: `💳 Pay ${card.name} ${amt} (${item.name})`,
+        detail: `${item.name} is charged to ${card.name} today. Pay ${amt} from chequing right away so no interest builds up.`, daysBefore: 0 });
+      else if (item.kind === "income") out.push({ uid: `pay-${item.id}-${iso}`, day: o.date, title: `💰 ${item.name} ${amt}`,
+        detail: `${item.name} should land today.`, daysBefore: 0 });
+      else out.push({ uid: `bill-${item.id}-${iso}`, day: o.date, title: `🧾 ${item.name} ${amt}`,
+        detail: `${item.name} comes out of chequing today.`, daysBefore });
+    }
+  }
+  if (debtPayments && plan) {
+    const names = new Map(data.debts.map((d) => [d.id, d.name]));
+    const byKey = new Map();
+    for (const p of plan.payments) {
+      if (p.date < today || p.date > end) continue;
+      const k = `${p.debt_id}|${p.date}`;
+      const cur = byKey.get(k) || { id: p.debt_id, d: p.date, mins: 0, extra: 0 };
+      if (p.extra) cur.extra += p.amount; else cur.mins += p.amount;
+      byKey.set(k, cur);
+    }
+    for (const { id, d, mins, extra } of [...byKey.values()].sort((a, b) => a.d - b.d)) {
+      const name = names.get(id) || "Debt";
+      const total = fmtMoney(mins + extra, sym);
+      const parts = [mins ? `minimum ${fmtMoney(mins, sym)}` : "", extra ? `extra ${fmtMoney(extra, sym)}` : ""].filter(Boolean);
+      out.push({ uid: `debt-${id}-${toISO(d)}`, day: d, title: `💳 ${name} payment ${total}`,
+        detail: `Payoff plan: pay ${total} to ${name} (${parts.join(" + ")}).`, daysBefore });
+    }
+  }
+  return out.sort((a, b) => (a.day - b.day) || cpCmp(a.title, b.title));
+}
+
+const icsEsc = (t) => t.replace(/\\/g, "\\\\").replace(/;/g, "\;").replace(/,/g, "\\,").replace(/\n/g, "\\n");
+function icsFold(line) {
+  const enc = new TextEncoder();
+  const out = [];
+  let cur = "", size = 0;
+  for (const ch of line) {
+    const n = enc.encode(ch).length;
+    if (size + n > 74) { out.push(cur); cur = " "; size = 1; }
+    cur += ch; size += n;
+  }
+  out.push(cur);
+  return out.join("\r\n");
+}
+export function toICS(reminders, at = "09:00", calendarName = "Balance Tracker", now = new Date()) {
+  const [hh, mm] = at.split(":").map(Number);
+  const p2 = (x) => String(x).padStart(2, "0");
+  const stamp = now.toISOString().replace(/[-:]/g, "").slice(0, 15) + "Z";
+  const local = (day, minutes) => {
+    const t = hh * 60 + mm + minutes;
+    const { y, m, d } = ymd(day + Math.floor(t / 1440)); // past midnight rolls to the next day
+    const tt = t % 1440;
+    return `${y}${p2(m)}${p2(d)}T${p2(Math.floor(tt / 60))}${p2(tt % 60)}00`;
+  };
+  const lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Balance Tracker//Reminders//EN", "CALSCALE:GREGORIAN",
+    "METHOD:PUBLISH", `X-WR-CALNAME:${icsEsc(calendarName)}`];
+  for (const r of reminders) {
+    lines.push("BEGIN:VEVENT", `UID:${r.uid}@balance-tracker`, `DTSTAMP:${stamp}`, `DTSTART:${local(r.day, 0)}`,
+      `DTEND:${local(r.day, 15)}`, `SUMMARY:${icsEsc(r.title)}`, `DESCRIPTION:${icsEsc(r.detail)}`, "TRANSP:TRANSPARENT",
+      "BEGIN:VALARM", "ACTION:DISPLAY", `DESCRIPTION:${icsEsc(r.title)}`, "TRIGGER:PT0M", "END:VALARM");
+    if (r.daysBefore) lines.push("BEGIN:VALARM", "ACTION:DISPLAY", `DESCRIPTION:${icsEsc("Coming up: " + r.title)}`,
+      `TRIGGER:-P${r.daysBefore}D`, "END:VALARM");
+    lines.push("END:VEVENT");
+  }
+  lines.push("END:VCALENDAR");
+  return lines.map(icsFold).join("\r\n") + "\r\n";
+}
+
+// CSV of forecast entries (same columns as the desktop export)
+export function ledgerCSV(entries) {
+  const q = (v) => { const s = String(v ?? ""); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const rows = [["Date", "Description", "Category", "Type", "Amount", "Balance"]];
+  for (const e of entries) rows.push([toISO(e.date), e.description, e.category, e.kind, (e.amount / 100).toFixed(2), (e.balance / 100).toFixed(2)]);
+  return "\ufeff" + rows.map((r) => r.map(q).join(",")).join("\r\n") + "\r\n";
+}
