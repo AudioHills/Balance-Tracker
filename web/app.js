@@ -1,6 +1,7 @@
 // Balance Tracker — iPhone web app. All data stays on the phone (localStorage);
 // syncing with the PC happens through a file in iCloud Drive.
 import * as E from "./engine.js";
+import * as L from "./lock.js";
 
 const KEY = "bt-data-v1";
 const META = "bt-meta-v1";
@@ -11,6 +12,8 @@ const clone = (x) => JSON.parse(JSON.stringify(x));
 
 let data, saved, meta, today, plan, fc;
 let tab = "home";
+let locked = L.enabled();
+let hiddenAt = null;
 const ui = { range: 3, everyDay: false, daysAhead: 60, billFilter: "all" };
 
 // ------------------------------------------------------------------ storage
@@ -103,6 +106,8 @@ function topbar(title) {
     <button class="iconbtn" data-act="sync" aria-label="Sync with PC">⟳${meta.unsent ? '<span class="dot"></span>' : ""}</button></div>`;
 }
 function render() {
+  if (locked) { renderLock(); return; }
+  $("#tabs").classList.remove("hidden");
   document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("on", b.dataset.tab === tab));
   const views = { home: viewHome, days: viewDays, bills: viewBills, debts: viewDebts, more: viewMore };
   $("#app").innerHTML = views[tab]();
@@ -624,6 +629,8 @@ function sheetSettings() {
     ${field("Currency symbol", `<input id="se_cur" value="${esc(s.currency_symbol)}" maxlength="4">`)}
     ${field("Appearance", `<select id="se_theme">${opts({ system: "Match iPhone", light: "Light", dark: "Dark" }, theme)}</select>`)}
     ${toggle("Ask for my balance when I open the app", "se_prompt", localStorage.getItem("bt-prompt") !== "0")}</div>
+    <div class="list"><div class="row tap" data-act="security"><div class="badge ci">🔒</div><div class="main"><div class="title">Face ID &amp; passcode</div>
+      <div class="sub">${L.enabled() ? (L.faceIdOn() ? "On — Face ID with passcode backup" : "On — passcode") : "Off"}</div></div><div class="muted">›</div></div></div>
     <button class="btn primary block" data-act="savesettings">Save</button>
     <button class="btn danger block" style="margin-top:22px" data-act="reset">Erase all data on this phone</button>`);
 }
@@ -717,6 +724,71 @@ function delCheckpoint(id) {
   save("Check-in deleted", true);
 }
 
+// ------------------------------------------------------------------ app lock
+function renderLock() {
+  closeSheet();
+  $("#tabs").classList.add("hidden");
+  const wait = L.waitSeconds();
+  $("#app").innerHTML = `<div class="lock"><img src="icons/icon-192.png" width="76" height="76" alt="">
+    <h1>Balance Tracker</h1><p class="muted">Locked</p>
+    ${L.faceIdOn() ? `<button class="btn primary block" data-act="faceid">Unlock with Face ID</button><div class="or">or enter your passcode</div>` : ""}
+    <input id="lk_pin" type="password" inputmode="numeric" autocomplete="off" maxlength="12" placeholder="Passcode" ${wait ? "disabled" : ""}>
+    <button class="btn block ${L.faceIdOn() ? "" : "primary"}" data-act="pinunlock" ${wait ? "disabled" : ""}>Unlock</button>
+    <p class="small neg" id="lk_msg">${wait ? `Too many tries — wait ${wait}s` : ""}</p>
+    <button class="linkbtn" data-act="forgot">Forgot passcode?</button></div>`;
+  if (wait) setTimeout(() => locked && renderLock(), 1000);
+}
+async function tryFaceId(auto = false) {
+  if (!L.faceIdOn()) return;
+  try {
+    if (await L.verifyFaceId()) unlock();
+  } catch (e) {
+    // iPhone may refuse an automatic prompt until the screen is tapped — the button handles that
+    if (!auto && e.name !== "NotAllowedError") toast("Face ID: " + e.message);
+  }
+}
+async function pinUnlock() {
+  const pin = $("#lk_pin")?.value || "";
+  if (!pin) return;
+  if (await L.checkPin(pin)) { unlock(); return; }
+  renderLock();
+  if (!L.waitSeconds()) $("#lk_msg").textContent = "Wrong passcode";
+}
+function unlock() {
+  locked = false;
+  hiddenAt = null;
+  refresh();
+  startupPrompt();
+}
+
+function sheetSecurity() {
+  if (!L.enabled()) {
+    openSheet("Face ID & passcode", `<p class="hint" style="padding-top:0">Lock Balance Tracker so nobody else using your phone can see your finances.
+      First choose a passcode (your backup if Face ID doesn't work), then turn on Face ID.</p>
+      <div class="form">${field("New passcode", `<input id="sc_p1" type="password" inputmode="numeric" maxlength="12" placeholder="4–12 digits">`)}
+      ${field("Confirm", `<input id="sc_p2" type="password" inputmode="numeric" maxlength="12">`)}</div>
+      <button class="btn primary block" data-act="savepin">Continue</button>`);
+    return;
+  }
+  L.faceIdAvailable().then((avail) => {
+    openSheet("Face ID & passcode", `<div class="list">
+      ${L.faceIdOn() ? `<div class="row"><div class="badge in">✓</div><div class="main"><div class="title">Face ID is on</div><div class="sub">Passcode works as a backup</div></div></div>`
+        : avail ? `<div class="row tap" data-act="enablefaceid"><div class="badge ci">☺</div><div class="main"><div class="title accent">Turn on Face ID</div><div class="sub">Your iPhone will ask to save a passkey</div></div></div>`
+        : `<div class="row"><div class="main"><div class="title">Face ID isn't available</div><div class="sub">Open the app from your Home Screen icon and make sure Face ID is set up in iPhone Settings.</div></div></div>`}
+      </div>
+      <div class="form">${field("Lock", `<select id="sc_after" data-change="lockafter">${[[0, "Every time I leave"], [1, "After 1 minute"], [5, "After 5 minutes"], [15, "After 15 minutes"]]
+        .map(([m, t]) => `<option value="${m}" ${L.lockAfterMinutes() === m ? "selected" : ""}>${t}</option>`).join("")}</select>`)}</div>
+      <div class="dayhead"><span>Change passcode</span></div>
+      <div class="form">${field("New passcode", `<input id="sc_p1" type="password" inputmode="numeric" maxlength="12" placeholder="4–12 digits">`)}
+      ${field("Confirm", `<input id="sc_p2" type="password" inputmode="numeric" maxlength="12">`)}</div>
+      <button class="btn block" data-act="savepin">Change passcode</button>
+      ${L.faceIdOn() ? `<button class="btn block" style="margin-top:10px" data-act="disablefaceid">Turn off Face ID (keep passcode)</button>` : ""}
+      <div class="dayhead" style="margin-top:12px"><span>Turn off the lock</span></div>
+      <div class="form">${field("Current passcode", `<input id="sc_cur" type="password" inputmode="numeric" maxlength="12">`)}</div>
+      <button class="btn danger block" data-act="disablelock">Turn off app lock</button>`);
+  });
+}
+
 // ------------------------------------------------------------------ events
 document.addEventListener("click", async (ev) => {
   const t = ev.target.closest("[data-act],[data-tab]");
@@ -725,6 +797,33 @@ document.addEventListener("click", async (ev) => {
   const ds = t.dataset;
   switch (ds.act) {
     case "close": closeSheet(); break;
+    case "faceid": await tryFaceId(); break;
+    case "pinunlock": await pinUnlock(); break;
+    case "forgot": {
+      if (!confirm("Forgot your passcode? This erases Balance Tracker's data on this phone only — your PC and the iCloud sync file are untouched, so you can sync everything back right after. Continue?")) break;
+      L.disable(); localStorage.removeItem(KEY); localStorage.removeItem(META);
+      load(); locked = false; tab = "home"; refresh(); break;
+    }
+    case "security": sheetSecurity(); break;
+    case "savepin": {
+      const p1 = val("sc_p1"), p2 = val("sc_p2");
+      if (!/^\d{4,12}$/.test(p1)) { toast("Use 4 to 12 digits"); break; }
+      if (p1 !== p2) { toast("The passcodes don't match"); break; }
+      const first = !L.enabled();
+      await L.setPin(p1);
+      toast(first ? "Passcode set — now turn on Face ID" : "Passcode changed");
+      sheetSecurity(); break;
+    }
+    case "enablefaceid": {
+      try { await L.registerFaceId(); toast("Face ID is on 🔒"); }
+      catch (e) { toast(e.name === "NotAllowedError" ? "Face ID setup was cancelled" : "Couldn't turn on Face ID: " + e.message); }
+      sheetSecurity(); break;
+    }
+    case "disablefaceid": L.forgetFaceId(); toast("Face ID off — passcode still required"); sheetSecurity(); break;
+    case "disablelock": {
+      if (!(await L.checkPin(val("sc_cur")))) { toast(L.waitSeconds() ? "Too many tries — wait a moment" : "Wrong passcode"); break; }
+      L.disable(); closeSheet(); toast("App lock turned off"); break;
+    }
     case "sync": sheetSync(); break;
     case "pullsync": await pullSync(); break;
     case "pushsync": await pushSync(); break;
@@ -832,9 +931,13 @@ document.addEventListener("click", async (ev) => {
     }
   }
 });
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter" && ev.target.id === "lk_pin") pinUnlock();
+});
 document.addEventListener("change", (ev) => {
   const t = ev.target.closest("[data-change]");
   if (!t) return;
+  if (t.dataset.change === "lockafter") { L.setAfter(Number(t.value)); toast("Saved"); return; }
   const s = data.settings;
   if (t.dataset.change === "dmode") s.debt_mode = t.value;
   if (t.dataset.change === "dfixed") s.debt_fixed_extra = parseMoney(t.value);
@@ -858,12 +961,28 @@ render();
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible" && E.todayDay() !== today) refresh();
 });
-const lc = E.latestCheckpoint(data);
-if (lc && E.toDay(lc.date) < today && localStorage.getItem("bt-prompt") !== "0" && meta.lastPrompt !== E.toISO(today)) {
-  meta.lastPrompt = E.toISO(today);
-  persist();
-  setTimeout(sheetCheckin, 400);
+function startupPrompt() {
+  const lc = E.latestCheckpoint(data);
+  if (lc && E.toDay(lc.date) < today && localStorage.getItem("bt-prompt") !== "0" && meta.lastPrompt !== E.toISO(today)) {
+    meta.lastPrompt = E.toISO(today);
+    persist();
+    setTimeout(sheetCheckin, 400);
+  }
 }
+if (locked) tryFaceId(true); else startupPrompt();
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") {
+    hiddenAt = Date.now();
+    document.body.classList.add("cover"); // hide balances in the app switcher
+  } else {
+    document.body.classList.remove("cover");
+    if (L.enabled() && !locked && hiddenAt !== null && (Date.now() - hiddenAt) / 60000 >= L.lockAfterMinutes()) {
+      locked = true;
+      render();
+      tryFaceId(true);
+    }
+  }
+});
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
-window.__bt = { get data() { return data; }, E }; // for automated tests
+window.__bt = { get data() { return data; }, get locked() { return locked; }, E, L }; // for automated tests

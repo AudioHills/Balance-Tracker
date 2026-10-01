@@ -177,6 +177,18 @@ dialog.sheet[open] { animation: up .25s cubic-bezier(.2, .9, .3, 1); display: fl
 .result .big { font-size: 24px; font-weight: 750; }
 .steps { padding-left: 20px; margin: 6px 0 0; } .steps li { margin: 6px 0; }
 
+/* ---------- app lock ---------- */
+.lock { max-width: 340px; margin: 0 auto; padding-top: 12vh; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.lock img { border-radius: 18px; box-shadow: 0 10px 30px rgba(79, 95, 232, .3); }
+.lock h1 { margin: 8px 0 0; font-size: 26px; }
+.lock p { margin: 0 0 14px; }
+.lock input { width: 100%; text-align: center; font-size: 22px; letter-spacing: .3em; padding: 12px; border-radius: 12px;
+  border: 1px solid var(--border); background: var(--surface); outline: none; }
+.lock input:focus { border-color: var(--accent); }
+.lock .or { color: var(--muted); font-size: 13px; margin: 6px 0 2px; }
+.linkbtn { background: none; border: 0; color: var(--accent); font-weight: 600; padding: 8px; }
+body.cover #app, body.cover .tabs, body.cover dialog { filter: blur(24px); }
+
 /* ---------- toast ---------- */
 #toast {
   position: fixed; left: 50%; bottom: calc(var(--safe-bottom) + 84px); transform: translateX(-50%) translateY(20px);

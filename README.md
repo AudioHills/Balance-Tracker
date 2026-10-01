@@ -75,6 +75,10 @@ engine as the PC: `tests/test_web_engine.py` checks that both produce identical 
    phone edits back, tap **Send to PC → Save to Files → iCloud Drive → Balance Tracker → Replace**.
    The PC merges them within a minute.
 
+**Face ID lock.** In the iPhone app, go to *More → Settings → Face ID & passcode*. It uses Face ID (via a
+passkey) with a passcode backup, stored only as a salted PBKDF2 hash. Repeated wrong passcodes trigger
+growing wait times, and balances are blurred in the app switcher.
+
 Each income/bill and debt carries a change timestamp, and deletions are remembered. Merging keeps
 the newest version of every record, so edits made on either device survive whichever order you sync in.
 
