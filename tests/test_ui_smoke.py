@@ -218,3 +218,23 @@ def test_hide_balance_eye(app, tmp_path):
     assert w2.side_balance.text() == "$1,234.56"
     from balance_tracker.sync import sync_payload
     assert "hide_balance" not in sync_payload(store.load())  # a per-device choice, not synced
+
+
+def test_checkin_explains_items_still_to_come(app, tmp_path):
+    from balance_tracker.models import RecurringItem
+    t = date.today()
+    data = AppData()
+    data.checkpoints.append(Checkpoint(t - timedelta(days=3), 141801))
+    data.items.append(RecurringItem("Rent", 165000, BILL, "monthly", t))
+    w = MainWindow(storage.Store(tmp_path), data)
+    dlg = dialogs.CheckInDialog(w.data, t, w, builder=w.build_forecast)
+    assert dlg.includes.text() == "Rent −$1,650.00 has already gone through"
+    dlg.balance.set_cents(250000)
+    assert "$2,500.00" in dlg.after_lbl.text()
+    dlg.includes.setChecked(False)
+    assert dlg.after_lbl.text() == "Balance today will show $850.00 once Rent comes out."
+    dlg.accept()
+    w.data.add_checkpoint(dlg.result_checkpoint)
+    w.commit()
+    assert w.pages[0].c_today.value.text() == "$850.00"
+    assert "Bank showed $2,500.00 at check-in" in w.pages[0].c_today.sub.text()

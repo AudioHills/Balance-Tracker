@@ -134,7 +134,7 @@ function viewHome() {
   html += `<div class="card hero"><div class="label-row"><span class="label">Balance today</span>
     <button class="eye" data-act="eye" aria-label="${hide ? "Show balance" : "Hide balance"}">${hide ? EYE_SHUT : EYE_OPEN}</button></div>
     <div class="big num ${hide ? "" : tone(bal)}">${hide ? MASK : money(bal)}</div>
-    <div class="muted small">Last checked in ${agoText}</div>
+    <div class="muted small">Last checked in ${agoText}</div>${pendingNote(last, hide)}
     <div class="actions"><button class="btn primary grow" data-act="checkin">Check in balance</button>
     <button class="btn grow" data-act="afford">Can I afford it?</button></div></div>`;
 
@@ -184,6 +184,16 @@ function viewHome() {
     <div class="kv"><span class="muted">Left over</span><span class="num bold ${inc - bills >= 0 ? "pos" : "neg"}">${money(inc - bills)}</span></div>
     ${plan ? `<div class="kv"><span class="muted">Debt-free by</span><span class="bold ${plan.debtFree ? "pos" : "neg"}">${plan.debtFree ? fmtDate(plan.debtFree, { month: "long", year: "numeric" }) : "10+ years"}</span></div>` : ""}</div>`;
   return html;
+}
+
+// When today's check-in was entered before today's bills/pay went through, Balance today is the
+// end-of-day figure — say so, so it doesn't look like the entered number was ignored.
+function pendingNote(cp, hide) {
+  if (!cp || E.toDay(cp.date) !== today || cp.includes_today) return "";
+  const pending = (fc.balanceOn(today) ?? cp.balance) - cp.balance;
+  if (!pending) return "";
+  if (hide) return `<div class="muted small">Includes items still to go through today</div>`;
+  return `<div class="muted small">Bank showed ${money(cp.balance)} at check-in · ${money(pending, true)} still to ${pending < 0 ? "come out" : "come in"} today</div>`;
 }
 
 function viewWelcome() {
@@ -467,19 +477,28 @@ function sheetCheckin(draft = null) {
       const temp = { ...data, checkpoints: data.checkpoints.filter((c) => c.date !== E.toISO(d)) };
       const todays = data.items.flatMap((i) => E.occurrences(i, d, d));
       $("#ci_inc_row", s).classList.toggle("hidden", !todays.length);
-      $("#ci_items", s).textContent = todays.length ? "Scheduled that day: " + todays.map((o) => `${o.item.name} ${money(o.amount, true)}`).join(", ") : "";
-      let projected = null;
+      const what = todays.map((o) => `${o.item.name} ${money(o.amount, true)}`).join(", ");
+      const lbl = $("#ci_inc_row label[for='ci_inc']", s);
+      if (lbl) lbl.textContent = todays.length === 1 ? `${what} has already gone through` : `These have already gone through`;
+      $("#ci_items", s).textContent = todays.length > 1 ? `Scheduled that day: ${what}. Turn this off if they haven't hit your account yet.`
+        : todays.length ? "Turn this off if it hasn't hit your account yet." : "";
+      let projected = null, pending = 0;
       if (temp.checkpoints.length) {
         const f = build([], true, temp, d);
+        pending = (f.balanceOn(d) ?? 0) - (f.balanceBefore(d) ?? 0);
         projected = checked("ci_inc") || !todays.length ? f.balanceOn(d) : f.balanceBefore(d);
       }
       if (first && projected !== null) $("#ci_bal", s).value = (projected / 100).toFixed(2);
       const r = $("#ci_result", s);
       if (projected === null) { r.innerHTML = `<div class="muted">This replaces your starting balance.</div>`; return; }
       const diff = parseMoney(val("ci_bal")) - projected;
+      const entered = parseMoney(val("ci_bal"));
+      const later = todays.length && !checked("ci_inc") && pending
+        ? `<div class="small" style="margin-top:8px">${d === today ? "Balance today" : "That day"} will show <b>${money(entered + pending)}</b> once ${esc(todays.map((o) => o.item.name).join(" and "))} ${pending < 0 ? "comes out" : "comes in"}.</div>`
+        : `<div class="small muted" style="margin-top:8px">${d === today ? "Balance today" : "That day"} will show <b>${money(entered)}</b>.</div>`;
       r.innerHTML = `<div class="muted small">The plan expected ${money(projected)}</div>` + (diff < 0
         ? `<div class="big neg">${money(-diff)} unplanned spending</div>`
-        : diff > 0 ? `<div class="big pos">${money(diff)} more than planned</div>` : `<div class="big pos">Right on plan ✓</div>`);
+        : diff > 0 ? `<div class="big pos">${money(diff)} more than planned</div>` : `<div class="big pos">Right on plan ✓</div>`) + later;
     };
     s.querySelectorAll("#ci_date,#ci_bal,#ci_inc").forEach((el) => el.addEventListener("input", () => upd(false)));
     if (draft) {

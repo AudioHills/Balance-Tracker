@@ -251,7 +251,13 @@ class DashboardPage:
         ago = "today" if days_ago == 0 else "yesterday" if days_ago == 1 else f"{days_ago} days ago"
         hidden = s.hide_balance
         self.eye.set_state(hidden)
-        self.c_today.set(MASK if hidden else money.fmt(bal), f"Last checked in {ago}",
+        note = f"Last checked in {ago}"
+        if last.date == today and not last.includes_today and bal is not None and bal != last.balance:
+            pending = bal - last.balance
+            note += ("\nIncludes items still to go through today" if hidden else
+                     f"\nBank showed {money.fmt(last.balance)} at check-in · {money.fmt(pending, signed=True)} "
+                     f"still to {'come out' if pending < 0 else 'come in'} today")
+        self.c_today.set(MASK if hidden else money.fmt(bal), note,
                          None if hidden or bal is None else bal_color(bal, s.low_balance_threshold))
 
         safe = f.safe_to_spend(today, 30, s.low_balance_threshold)

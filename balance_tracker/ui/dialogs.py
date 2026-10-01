@@ -248,7 +248,8 @@ class CheckInDialog(BaseDialog):
         self.projected_lbl = label("", "Muted")
         self.diff_lbl = label("", "StatValue")
         self.diff_sub = label("", "Hint", wrap=True)
-        for w in (self.projected_lbl, self.diff_lbl, self.diff_sub):
+        self.after_lbl = label("", "Muted", wrap=True)
+        for w in (self.projected_lbl, self.diff_lbl, self.diff_sub, self.after_lbl):
             bl.addWidget(w)
         self.outer.addWidget(box)
         self.add_buttons("Save check-in")
@@ -274,10 +275,15 @@ class CheckInDialog(BaseDialog):
     def _refresh(self, *_, initial: bool = False):
         d, before, after, todays = self._projected()
         self.includes.setVisible(bool(todays))
+        what = ", ".join(f"{o.item.name} {money.fmt(o.amount, signed=True)}" for o in todays)
         if todays:
-            self.items_label.setText("Scheduled that day: " + ", ".join(
-                f"{o.item.name} {money.fmt(o.amount, signed=True)}" for o in todays))
+            self.includes.setText(f"{what} has already gone through" if len(todays) == 1
+                                  else "These have already gone through")
+            self.items_label.setText(
+                (f"Scheduled that day: {what}. " if len(todays) > 1 else "")
+                + "Untick this if " + ("they haven't" if len(todays) > 1 else "it hasn't") + " hit your account yet.")
         self.items_label.setVisible(bool(todays))
+        pending = (after - before) if after is not None and before is not None else 0
         projected = after if (self.includes.isChecked() or not todays) else before
         if initial and projected is not None:
             self.balance.set_cents(projected)
@@ -287,11 +293,19 @@ class CheckInDialog(BaseDialog):
                                        else "No projection for this date.")
             self.diff_lbl.setText("")
             self.diff_sub.setText("")
+            self.after_lbl.setText("")
             self._proj = None
             return
         self._proj = projected
         diff = self.balance.cents() - projected
         self.projected_lbl.setText(f"The plan expected {money.fmt(projected)}")
+        day_word = "Balance today" if d == date.today() else "That day"
+        if todays and not self.includes.isChecked() and pending:
+            names = " and ".join(o.item.name for o in todays)
+            self.after_lbl.setText(f"{day_word} will show {money.fmt(self.balance.cents() + pending)} once {names} "
+                                   f"{'comes out' if pending < 0 else 'comes in'}.")
+        else:
+            self.after_lbl.setText(f"{day_word} will show {money.fmt(self.balance.cents())}.")
         col = theme.colors()
         if diff < 0:
             self.diff_lbl.setText(f"{money.fmt(-diff)} unplanned spending")
