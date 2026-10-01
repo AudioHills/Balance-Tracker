@@ -105,6 +105,10 @@ def merge_data(current: AppData, incoming: AppData) -> AppData:
     for c in incoming.checkpoints:
         if c.date not in have_cps:
             current.checkpoints.append(c)
+    have_debts = {d.id for d in current.debts}
+    for d in incoming.debts:
+        if d.id not in have_debts:
+            current.debts.append(d)
     return current
 
 

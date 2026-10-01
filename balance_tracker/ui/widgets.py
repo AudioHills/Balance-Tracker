@@ -4,11 +4,13 @@ from __future__ import annotations
 import math
 from datetime import date
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtCore import QDate, QPoint, QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import (
+    QColor, QFont, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QTextCharFormat,
+)
 from PySide6.QtWidgets import (
-    QDoubleSpinBox, QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QSizePolicy,
-    QVBoxLayout, QWidget,
+    QCalendarWidget, QDoubleSpinBox, QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel,
+    QPushButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from .. import money
@@ -91,6 +93,153 @@ class MoneySpin(QDoubleSpinBox):
         super().focusInEvent(e)
         from PySide6.QtCore import QTimer
         QTimer.singleShot(0, self.selectAll)
+
+
+def calendar_icon(color: str, size: int = 18) -> QIcon:
+    pm = QPixmap(size * 2, size * 2)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    s = size * 2
+    pen = QPen(QColor(color), s * 0.08)
+    p.setPen(pen)
+    p.setBrush(Qt.NoBrush)
+    p.drawRoundedRect(QRectF(s * 0.12, s * 0.2, s * 0.76, s * 0.68), s * 0.1, s * 0.1)
+    p.drawLine(QPointF(s * 0.12, s * 0.4), QPointF(s * 0.88, s * 0.4))
+    p.drawLine(QPointF(s * 0.32, s * 0.1), QPointF(s * 0.32, s * 0.28))
+    p.drawLine(QPointF(s * 0.68, s * 0.1), QPointF(s * 0.68, s * 0.28))
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(color))
+    for i in range(3):
+        for j in range(2):
+            p.drawEllipse(QPointF(s * (0.3 + i * 0.2), s * (0.56 + j * 0.16)), s * 0.045, s * 0.045)
+    p.end()
+    return QIcon(pm)
+
+
+class CalendarPopup(QFrame):
+    """Floating month calendar shown under a DateField."""
+
+    picked = Signal(QDate)
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.Popup)
+        self.setObjectName("CalendarPopup")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(8)
+        self.cal = QCalendarWidget()
+        self.cal.setObjectName("Calendar")
+        self.cal.setGridVisible(False)
+        self.cal.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
+        self.cal.setHorizontalHeaderFormat(QCalendarWidget.ShortDayNames)
+        self.cal.setMinimumSize(320, 250)
+        self.cal.clicked.connect(self._pick)
+        self.cal.activated.connect(self._pick)
+        lay.addWidget(self.cal)
+        today = QPushButton("Today")
+        today.setObjectName("Chip")
+        today.clicked.connect(lambda: self._pick(QDate.currentDate()))
+        lay.addLayout(hbox(None, today))
+
+    def _pick(self, d: QDate):
+        if self.cal.minimumDate() <= d <= self.cal.maximumDate():
+            self.picked.emit(d)
+            self.hide()
+
+    def open_at(self, anchor: QWidget, current: QDate, lo: QDate, hi: QDate):
+        col = theme.colors()
+        self.cal.setDateRange(lo, hi)
+        self.cal.setSelectedDate(current)
+        fmt = QTextCharFormat()
+        fmt.setForeground(QColor(col["text"]))
+        for day in (Qt.Saturday, Qt.Sunday):
+            wk = QTextCharFormat()
+            wk.setForeground(QColor(col["muted"]))
+            self.cal.setWeekdayTextFormat(day, wk)
+        self.cal.setDateTextFormat(QDate(), QTextCharFormat())  # clear old marks
+        tf = QTextCharFormat()
+        tf.setFontWeight(QFont.Bold)
+        tf.setForeground(QColor(col["accent"]))
+        self.cal.setDateTextFormat(QDate.currentDate(), tf)
+        hdr = QTextCharFormat()
+        hdr.setForeground(QColor(col["muted"]))
+        hdr.setBackground(QColor(col["surface"]))
+        self.cal.setHeaderTextFormat(hdr)
+        self.adjustSize()
+        pos = anchor.mapToGlobal(QPoint(0, anchor.height() + 4))
+        screen = anchor.screen().availableGeometry() if anchor.screen() else None
+        if screen is not None:
+            if pos.y() + self.height() > screen.bottom():
+                pos = anchor.mapToGlobal(QPoint(0, -self.height() - 4))
+            pos.setX(min(pos.x(), screen.right() - self.width()))
+        self.move(pos)
+        self.show()
+        self.cal.setFocus()
+
+
+class DateField(QPushButton):
+    """A date box that opens a clickable calendar. API mirrors the bits of QDateEdit we use."""
+
+    dateChanged = Signal(QDate)
+
+    def __init__(self, d: QDate, parent=None):
+        super().__init__(parent)
+        self.setObjectName("DateField")
+        self.setCursor(Qt.PointingHandCursor)
+        self._date = d
+        self._min = QDate(1990, 1, 1)
+        self._max = QDate(2100, 12, 31)
+        self.setMinimumWidth(190)
+        self.setIconSize(QSize(18, 18))
+        self._popup = None
+        self.clicked.connect(self.open_calendar)
+        self._render()
+
+    def _render(self):
+        self.setText(self._date.toString("ddd MMM d, yyyy"))
+        self.setIcon(calendar_icon(theme.colors()["muted"]))
+        self.setToolTip("Click to pick a date")
+
+    def open_calendar(self):
+        if self._popup is None:
+            self._popup = CalendarPopup(self)
+            self._popup.picked.connect(self.setDate)
+        self._popup.open_at(self, self._date, self._min, self._max)
+
+    def date(self) -> QDate:
+        return self._date
+
+    def setDate(self, d: QDate):
+        d = max(self._min, min(self._max, d))
+        if d != self._date:
+            self._date = d
+            self._render()
+            self.dateChanged.emit(d)
+
+    def setMinimumDate(self, d: QDate):
+        self._min = d
+        if self._date < d:
+            self.setDate(d)
+
+    def setMaximumDate(self, d: QDate):
+        self._max = d
+        if self._date > d:
+            self.setDate(d)
+
+    def wheelEvent(self, e):  # scroll to nudge a day at a time
+        step = 1 if e.angleDelta().y() > 0 else -1
+        self.setDate(self._date.addDays(step))
+
+    def keyPressEvent(self, e):
+        if e.key() in (Qt.Key_Up, Qt.Key_Right, Qt.Key_Plus):
+            self.setDate(self._date.addDays(1))
+        elif e.key() in (Qt.Key_Down, Qt.Key_Left, Qt.Key_Minus):
+            self.setDate(self._date.addDays(-1))
+        elif e.key() == Qt.Key_T:
+            self.setDate(QDate.currentDate())
+        else:
+            super().keyPressEvent(e)
 
 
 def hbox(*widgets, spacing: int = 10, margins=(0, 0, 0, 0)) -> QHBoxLayout:

@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import money, storage
-from ..forecast import monthly_equivalent, next_occurrence, add_months
+from ..forecast import monthly_equivalent, next_occurrence, add_months, horizon_end
 from ..models import BILL, FREQUENCIES, INCOME
 from . import theme
 from .dialogs import date_edit, from_qdate, to_qdate
@@ -103,6 +103,10 @@ class DashboardPage:
     def __init__(self, ctx):
         self.ctx = ctx
         self.widget, lay, head = page_shell("Dashboard", "")
+        afford = QPushButton("Can I afford it?")
+        afford.setToolTip("Ctrl+A")
+        afford.clicked.connect(ctx.afford)
+        head.addWidget(afford, 0, Qt.AlignTop)
         btn = QPushButton("Check in balance")
         btn.setObjectName("Primary")
         btn.clicked.connect(ctx.check_in)
@@ -163,10 +167,13 @@ class DashboardPage:
         self.s_bills = label("", "SectionTitle")
         self.s_net = label("", "SectionTitle")
         self.s_unplanned = label("", "SectionTitle")
+        self.s_debt = label("", "SectionTitle")
         self.snap_form.addRow(label("Income", "Muted"), self.s_income)
         self.snap_form.addRow(label("Bills", "Muted"), self.s_bills)
         self.snap_form.addRow(label("Left over", "Muted"), self.s_net)
         self.snap_form.addRow(label("Avg. unplanned", "Muted"), self.s_unplanned)
+        self.s_debt_label = label("Debt-free by", "Muted")
+        self.snap_form.addRow(self.s_debt_label, self.s_debt)
         snap.lay.addLayout(self.snap_form)
         self.snap_tip = label("", "Hint", wrap=True)
         snap.lay.addWidget(self.snap_tip)
@@ -205,7 +212,7 @@ class DashboardPage:
             self.c_safe.set(money.fmt(0), f"You're {money.fmt(-safe)} short of your cushion in the next 30 days",
                             "negative")
 
-        horizon = f.end
+        horizon = horizon_end(ctx.data, today)
         low = f.lowest(today, horizon)
         if low:
             self.c_low.set(money.fmt(low[1]), f"on {nice_date(low[0], today)}",
@@ -219,8 +226,8 @@ class DashboardPage:
                              "negative" if this < 0 else "positive")
 
         # alerts
-        neg = f.first_below(0, today)
-        below = f.first_below(s.low_balance_threshold, today)
+        neg = f.first_below(0, today, horizon)
+        below = f.first_below(s.low_balance_threshold, today, horizon)
         if neg:
             self.banner.show_message(
                 f"⚠  Heads up: you're projected to be in overdraft ({money.fmt(neg[1])}) "
@@ -268,6 +275,14 @@ class DashboardPage:
         self.s_bills.setText(money.fmt(bills))
         self.s_net.setText(money.fmt(net))
         self.s_net.setStyleSheet(f"color: {col['positive' if net >= 0 else 'negative']};")
+        plan = ctx.plan
+        has_debt = bool(plan and ctx.data.debts)
+        self.s_debt.setVisible(has_debt)
+        self.s_debt_label.setVisible(has_debt)
+        if has_debt:
+            free = plan.debt_free
+            self.s_debt.setText(free.strftime("%B %Y") if free else "10+ years")
+            self.s_debt.setStyleSheet(f"color: {col['positive' if free else 'negative']};")
         recent = [by_month.get(k, 0) for k in _last_full_months(today, 3)]
         avg = -sum(recent) // 3 if any(recent) else 0
         self.s_unplanned.setText(money.fmt(max(0, avg)) if any(recent) else "—")
@@ -698,7 +713,8 @@ class SettingsPage:
         form.addRow("Currency symbol", self.currency)
         form.addRow("Low-balance cushion", hbox(self.cushion, label(
             "You'll be warned when the forecast dips below this.", "Hint"), None))
-        form.addRow("Forecast ahead", hbox(self.horizon, None))
+        form.addRow("Watch ahead", hbox(self.horizon, label(
+            "How far ahead alerts and “lowest point” look.", "Hint"), None))
         form.addRow("", self.prompt)
         pref.lay.addLayout(form)
         lay.addWidget(pref)
@@ -811,3 +827,297 @@ class SettingsPage:
         path = self.auto.currentData()
         if path:
             self.ctx.restore_from(path)
+
+
+# ==========================================================================
+class DebtsPage:
+    def __init__(self, ctx):
+        from .widgets import BalanceChart
+        self.ctx = ctx
+        self.widget, lay, head = page_shell(
+            "Debts", "Credit cards, lines of credit and loans — with a payoff plan that only uses money "
+                     "your forecast says you can spare.")
+        add = QPushButton("+  Add debt")
+        add.setObjectName("Primary")
+        add.clicked.connect(ctx.add_debt)
+        head.addWidget(add, 0, Qt.AlignTop)
+
+        self.banner = Banner()
+        lay.addWidget(self.banner)
+
+        grid = QGridLayout()
+        grid.setSpacing(14)
+        self.c_total = StatCard("TOTAL OWED")
+        self.c_interest = StatCard("INTEREST THIS MONTH")
+        self.c_free = StatCard("DEBT-FREE BY")
+        self.c_saved = StatCard("INTEREST SAVED")
+        for i, w in enumerate((self.c_total, self.c_interest, self.c_free, self.c_saved)):
+            grid.addWidget(w, 0, i)
+        lay.addLayout(grid)
+
+        # --- plan controls
+        plan = Card()
+        plan.lay.addWidget(label("Your payoff plan", "SectionTitle"))
+        self.strat_btns = []
+        group = QButtonGroup(plan)
+        from ..models import DEBT_STRATEGIES
+        for key, text in DEBT_STRATEGIES.items():
+            b = QPushButton(text)
+            b.setObjectName("Chip")
+            b.setCheckable(True)
+            b.setProperty("key", key)
+            b.clicked.connect(self.save_plan)
+            group.addButton(b)
+            self.strat_btns.append(b)
+        self.mode = QComboBox()
+        self.mode.addItem("As much as my cushion allows", "auto")
+        self.mode.addItem("A fixed extra amount each month", "fixed")
+        self.fixed = MoneySpin()
+        self.fixed.setMaximumWidth(140)
+        self.in_forecast = QCheckBox("Show these payments in my day-by-day forecast")
+        plan.lay.addLayout(hbox(label("Pay off", "Muted"), *self.strat_btns, 16, label("Extra money:", "Muted"),
+                                self.mode, self.fixed, None, spacing=8))
+        plan.lay.addWidget(self.in_forecast)
+        self.next_action = label("", "SectionTitle", wrap=True)
+        plan.lay.addWidget(self.next_action)
+        self.plan_hint = label("", "Hint", wrap=True)
+        plan.lay.addWidget(self.plan_hint)
+        self.compare = table(["Approach", "Debt-free by", "Total interest", "Interest saved"], 0)
+        self.compare.setFixedHeight(3 * 38 + 44)
+        self.compare.setStyleSheet("QTableView { border: none; }")
+        plan.lay.addWidget(self.compare)
+        lay.addWidget(plan)
+        self.mode.currentIndexChanged.connect(self.save_plan)
+        self.fixed.editingFinished.connect(self.save_plan)
+        self.in_forecast.toggled.connect(self.save_plan)
+        self._loading = False
+
+        # --- debts table
+        self.table = table(["#", "Debt", "Type", "Balance", "Rate", "Limit used", "Min. now", "Paid off by",
+                            "Interest left"], 1)
+        self.table.setMinimumHeight(200)
+        self.table.cellDoubleClicked.connect(self._edit_row)
+        self.table.customContextMenuRequested.connect(self.menu)
+        lay.addWidget(self.table)
+        lay.addWidget(label("# is the order extra money goes · double-click to update a balance · "
+                            "right-click for more", "Hint"))
+
+        # --- chart + schedule
+        chart = Card()
+        chart.lay.addWidget(label("Total debt over time", "SectionTitle"))
+        self.chart = BalanceChart()
+        self.chart.setMinimumHeight(240)
+        chart.lay.addWidget(self.chart)
+        lay.addWidget(chart)
+
+        sched = Card()
+        sched.lay.addWidget(label("Payment schedule · next 12 months", "SectionTitle"))
+        sched.lay.addWidget(label("Minimums plus the planned extra, by month.", "Hint"))
+        self.schedule = table(["Month"], 0)
+        self.schedule.setMinimumHeight(2 * 38 + 44)
+        self.schedule.setStyleSheet("QTableView { border: none; }")
+        sched.lay.addWidget(self.schedule)
+        lay.addWidget(sched)
+
+    # ------------------------------------------------------------------
+    def _edit_row(self, r, _c=None):
+        it = self.table.item(r, 1)
+        if it and it.data(Qt.UserRole):
+            self.ctx.edit_debt(it.data(Qt.UserRole))
+
+    def menu(self, pos):
+        row = self.table.rowAt(pos.y())
+        it = self.table.item(row, 1) if row >= 0 else None
+        if not it or not it.data(Qt.UserRole):
+            return
+        debt_id = it.data(Qt.UserRole)
+        m = QMenu(self.table)
+        m.addAction("Update balance / edit…", lambda: self.ctx.edit_debt(debt_id))
+        m.addSeparator()
+        m.addAction("Delete", lambda: self.ctx.delete_debt(debt_id))
+        m.exec(self.table.viewport().mapToGlobal(pos))
+
+    def save_plan(self):
+        if self._loading:
+            return
+        s = self.ctx.data.settings
+        s.debt_strategy = next(b.property("key") for b in self.strat_btns if b.isChecked())
+        s.debt_mode = self.mode.currentData()
+        s.debt_fixed_extra = self.fixed.cents()
+        s.debt_in_forecast = self.in_forecast.isChecked()
+        self.ctx.commit()
+
+    def refresh(self):
+        from ..debts import make_plan, minimum_payment
+        from ..models import DEBT_KINDS, DEBT_STRATEGIES
+        ctx, today = self.ctx, self.ctx.today
+        data, s = ctx.data, ctx.data.settings
+        self._loading = True
+        for b in self.strat_btns:
+            b.setChecked(b.property("key") == s.debt_strategy)
+        self.mode.setCurrentIndex(0 if s.debt_mode == "auto" else 1)
+        self.fixed.setPrefix(money._symbol)
+        self.fixed.set_cents(s.debt_fixed_extra)
+        self.fixed.setVisible(s.debt_mode == "fixed")
+        self.in_forecast.setChecked(s.debt_in_forecast)
+        self._loading = False
+
+        debts = data.debts
+        plan = ctx.plan
+        total = sum(d.balance for d in debts)
+        limits = sum(d.credit_limit for d in debts if d.credit_limit)
+        used = sum(d.balance for d in debts if d.credit_limit)
+        self.c_total.set(money.fmt(total), f"{len(debts)} debts" + (
+            f" · {round(used / limits * 100)}% of credit limits used" if limits else ""),
+            "negative" if total else "positive")
+        interest = sum(round(d.balance * d.apr / 1200) for d in debts)
+        self.c_interest.set(money.fmt(interest), f"≈ {money.fmt(interest * 12)} a year at today's balances",
+                            "warning" if interest else None)
+
+        if not debts:
+            self.c_free.set("—", "Add a debt to build a plan")
+            self.c_saved.set("—")
+            self.banner.hide()
+            self.next_action.setText("Add your credit cards, lines of credit and loans to get a payoff plan.")
+            self.plan_hint.setText("")
+            for t in (self.compare, self.table, self.schedule):
+                t.setRowCount(0)
+            self.chart.set_data([], None, 0)
+            return
+
+        mins = make_plan(data, today, mode="minimum")
+        free = plan.debt_free
+        self.c_free.set(free.strftime("%b %Y") if free else "Not on track",
+                        _months_away(today, free) if free else "Minimums don't cover the interest, or it "
+                                                                "takes over 10 years", "positive" if free else "negative")
+        saved = mins.total_interest - plan.total_interest
+        self.c_saved.set(money.fmt(max(0, saved)), "vs. paying only the minimums", "positive")
+
+        # banner: stale balances / interest-only warnings
+        stale = [d for d in debts if (today - d.updated_on).days > 35]
+        never = [d for d in debts if d.id not in mins.payoff and d.balance > 0]
+        if stale:
+            self.banner.show_message(
+                f"Update your balance for {', '.join(d.name for d in stale)} — it's been over a month. "
+                "Double-click a debt to update it from your latest statement.", "warning")
+        elif never and not free:
+            self.banner.show_message(
+                f"{', '.join(d.name for d in never)}: the minimum payment only covers interest. "
+                "Extra payments are the only way to bring this down.", "warning")
+        else:
+            self.banner.hide()
+
+        # next action
+        nxt = plan.next_extra(today)
+        if nxt:
+            dname = data.debt(nxt.debt_id).name
+            self.next_action.setText(f"👉  Next: pay {money.fmt(nxt.amount)} extra to {dname} on "
+                                     f"{nxt.date.strftime('%A, %B %d')} (on top of the minimum).")
+        elif s.debt_mode == "auto":
+            self.next_action.setText("No extra money to spare right now — keep paying the minimums. "
+                                     "The plan adds extra as soon as your forecast has room above your cushion.")
+        else:
+            self.next_action.setText("Set a fixed extra amount above to speed things up.")
+        if s.debt_mode == "auto":
+            self.plan_hint.setText(
+                f"Extra payments are sized so your chequing balance never drops below your "
+                f"{money.fmt(s.low_balance_threshold)} cushion (change it in Settings). "
+                f"{DEBT_STRATEGIES[s.debt_strategy]} — " +
+                ("saves the most interest." if s.debt_strategy == "avalanche" else "quick wins to keep you motivated."))
+        else:
+            self.plan_hint.setText("When a debt is paid off, its minimum payment rolls into the next one.")
+
+        # comparison
+        rows = [("Minimum payments only", mins)]
+        for key, text in DEBT_STRATEGIES.items():
+            rows.append((text, plan if key == s.debt_strategy else make_plan(data, today, strategy=key)))
+        t = self.compare
+        t.setRowCount(0)
+        for name, p in rows:
+            r = t.rowCount()
+            t.insertRow(r)
+            chosen = p is plan
+            t.setItem(r, 0, cell(name + ("  ← your plan" if chosen else ""), bold=chosen,
+                                 color="accent" if chosen else None))
+            t.setItem(r, 1, cell(p.debt_free.strftime("%b %Y") if p.debt_free else "10+ years",
+                                 color=None if p.debt_free else "negative"))
+            t.setItem(r, 2, cell(money.fmt(p.total_interest), Qt.AlignRight))
+            sv = mins.total_interest - p.total_interest
+            t.setItem(r, 3, cell(money.fmt(sv) if p is not mins else "—", Qt.AlignRight,
+                                 "positive" if sv > 0 else "muted"))
+
+        # debts table
+        order = {d_id: i + 1 for i, d_id in enumerate(plan.order)}
+        t = self.table
+        t.setRowCount(0)
+        for d in sorted(debts, key=lambda d: order.get(d.id, 99)):
+            r = t.rowCount()
+            t.insertRow(r)
+            interest_m = d.balance * d.apr / 1200
+            mp = round(minimum_payment(d, d.balance + interest_m, interest_m))
+            t.setItem(r, 0, cell(str(order.get(d.id, "✓")), color="accent", bold=True))
+            sub = DEBT_KINDS[d.kind]
+            name_cell = cell(d.name, bold=True, data=d.id)
+            name_cell.setToolTip(f"{sub}" + (f" — {d.notes}" if d.notes else ""))
+            t.setItem(r, 1, name_cell)
+            t.setItem(r, 2, cell(sub, color="muted"))
+            t.setItem(r, 3, cell(money.fmt(d.balance), Qt.AlignRight, bold=True))
+            t.setItem(r, 4, cell(f"{d.apr:.2f}%", Qt.AlignRight, "negative" if d.apr >= 15 else None))
+            if d.credit_limit:
+                pct = round(d.balance / d.credit_limit * 100)
+                t.setItem(r, 5, cell(f"{pct}%", Qt.AlignRight,
+                                     "negative" if pct > 70 else "warning" if pct > 30 else "positive"))
+            else:
+                t.setItem(r, 5, cell("—", Qt.AlignRight, "muted"))
+            t.setItem(r, 6, cell(money.fmt(mp), Qt.AlignRight))
+            po = plan.payoff.get(d.id)
+            t.setItem(r, 7, cell(po.strftime("%b %Y") if po else "10+ years", Qt.AlignRight,
+                                 None if po else "negative"))
+            t.setItem(r, 8, cell(money.fmt(plan.interest.get(d.id, 0)), Qt.AlignRight, "muted"))
+
+        # chart (daily steps from the monthly totals)
+        pts = []
+        cur = total
+        it = iter(plan.totals)
+        nxt_pt = next(it, None)
+        end = plan.totals[-1][0] if plan.totals else today
+        day = today
+        while day <= end:
+            while nxt_pt and nxt_pt[0] < day:
+                cur = nxt_pt[1]
+                nxt_pt = next(it, None)
+            pts.append((day, cur))
+            day += timedelta(days=1)
+        self.chart.set_data(pts, None, 0)
+
+        # schedule
+        rows = plan.month_rows(today, 12)
+        live = [d for d in debts if any(d.id in per for _, per, _ in rows)]
+        t = self.schedule
+        t.clear()
+        t.setColumnCount(len(live) + 3)
+        t.setHorizontalHeaderLabels(["Month"] + [d.name for d in live] + ["of which extra", "Total"])
+        hh = t.horizontalHeader()
+        for i in range(t.columnCount()):
+            hh.setSectionResizeMode(i, QHeaderView.Stretch)
+        t.setRowCount(0)
+        for first, per, extra in rows:
+            r = t.rowCount()
+            t.insertRow(r)
+            t.setItem(r, 0, cell(first.strftime("%B %Y"), bold=True))
+            for j, d in enumerate(live):
+                v = per.get(d.id)
+                t.setItem(r, j + 1, cell(money.fmt(v) if v else "—", Qt.AlignRight, None if v else "muted"))
+            t.setItem(r, len(live) + 1, cell(money.fmt(extra) if extra else "—", Qt.AlignRight,
+                                             "positive" if extra else "muted"))
+            t.setItem(r, len(live) + 2, cell(money.fmt(sum(per.values())), Qt.AlignRight, bold=True))
+        t.setFixedHeight(max(1, t.rowCount()) * 38 + 44)
+
+
+def _months_away(today: date, d: date) -> str:
+    m = (d.year - today.year) * 12 + d.month - today.month
+    if m <= 0:
+        return "this month"
+    y, mm = divmod(m, 12)
+    parts = ([f"{y} year{'s' if y != 1 else ''}"] if y else []) + ([f"{mm} month{'s' if mm != 1 else ''}"] if mm else [])
+    return "in " + " ".join(parts)

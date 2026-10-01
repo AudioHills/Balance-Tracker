@@ -150,9 +150,14 @@ class Entry:
 class Forecast:
     """Day-by-day projected balance from the starting balance to `end`."""
 
-    def __init__(self, data: AppData, end: date, today: Optional[date] = None):
+    def __init__(self, data: AppData, end: date, today: Optional[date] = None,
+                 extra: Optional[list] = None, suppress: Optional[dict] = None):
+        """`extra`: additional Occurrences (e.g. planned debt payments).
+        `suppress`: item_id -> date; that item's occurrences on/after the date are left out."""
         self.data = data
         self.today = today or date.today()
+        self.extra = extra or []
+        self.suppress = suppress or {}
         self.entries: list = []
         self.daily: dict = {}  # date -> end-of-day balance
         self.start: Optional[date] = None
@@ -171,7 +176,15 @@ class Forecast:
 
         occ_by_date = defaultdict(list)
         for item in self.data.items:
+            cut = self.suppress.get(item.id)
             for o in occurrences(item, first.date, self.end):
+                if cut is None or o.date < cut:
+                    occ_by_date[o.date].append(o)
+        start_extras = []
+        for o in self.extra:
+            if o.date == first.date:
+                start_extras.append(o)  # never part of an entered balance
+            elif first.date < o.date <= self.end:
                 occ_by_date[o.date].append(o)
 
         running = first.balance
@@ -183,7 +196,10 @@ class Forecast:
                 self.entries.append(Entry(d, "start", "Starting balance", 0, running,
                                           checkpoint_id=first.id))
                 if not first.includes_today:
+                    todays = sorted(todays + start_extras, key=lambda o: (o.amount < 0, o.item.name.lower()))
                     running = self._apply(todays, running)
+                else:
+                    running = self._apply(start_extras, running)
             else:
                 cp = cp_by_date.get(d)
                 if cp is not None and not cp.includes_today:
@@ -202,7 +218,7 @@ class Forecast:
             running += o.amount
             self.entries.append(Entry(
                 o.date, "income" if o.amount >= 0 else "bill", o.item.name, o.amount, running,
-                category=o.item.category, item_id=o.item.id, scheduled=o.scheduled,
+                category=o.item.category, item_id=o.item.id or None, scheduled=o.scheduled,
                 overridden=o.overridden))
         return running
 
@@ -252,9 +268,9 @@ class Forecast:
             d += one
         return best
 
-    def first_below(self, threshold: int, a: date):
+    def first_below(self, threshold: int, a: date, b: Optional[date] = None):
         for d, bal in self.daily.items():
-            if d >= a and bal < threshold:
+            if d >= a and (b is None or d <= b) and bal < threshold:
                 return d, bal
         return None
 
@@ -282,5 +298,11 @@ class Forecast:
         return [e for e in self.entries if e.kind == "checkin"]
 
 
-def projection_end(data: AppData, today: date) -> date:
+def horizon_end(data: AppData, today: date) -> date:
+    """End of the user's chosen 'forecast ahead' window (used for alerts and stats)."""
     return add_months(today, data.settings.forecast_months)
+
+
+def projection_end(data: AppData, today: date) -> date:
+    """How far the forecast is computed: at least a year so every chart range works."""
+    return add_months(today, max(12, data.settings.forecast_months))

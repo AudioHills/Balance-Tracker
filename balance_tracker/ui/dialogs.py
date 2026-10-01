@@ -5,7 +5,7 @@ from datetime import date, timedelta
 
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFormLayout,
+    QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
     QFrame, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox, QVBoxLayout,
 )
 
@@ -15,7 +15,7 @@ from ..models import (
     AppData, BILL, Checkpoint, FREQUENCIES, INCOME, LAST_DAY, RecurringItem, WEEKEND_RULES,
 )
 from . import theme
-from .widgets import MoneySpin, hbox, label
+from .widgets import DateField, MoneySpin, hbox, label
 
 
 def to_qdate(d: date) -> QDate:
@@ -26,12 +26,8 @@ def from_qdate(q: QDate) -> date:
     return date(q.year(), q.month(), q.day())
 
 
-def date_edit(d: date) -> QDateEdit:
-    e = QDateEdit(to_qdate(d))
-    e.setCalendarPopup(True)
-    e.setDisplayFormat("ddd MMM d, yyyy")
-    e.setMinimumWidth(170)
-    return e
+def date_edit(d: date) -> DateField:
+    return DateField(to_qdate(d))
 
 
 class BaseDialog(QDialog):
@@ -199,7 +195,8 @@ class ItemDialog(BaseDialog):
 class CheckInDialog(BaseDialog):
     """Enter the real bank balance; the gap vs. the plan becomes unplanned spending."""
 
-    def __init__(self, data: AppData, today: date | None = None, parent=None):
+    def __init__(self, data: AppData, today: date | None = None, parent=None, builder=None):
+        self.builder = builder
         super().__init__("Balance check-in",
                          "What does your bank show right now? Any difference from the plan is "
                          "logged as unplanned spending (or income) and the forecast is re-anchored.",
@@ -253,7 +250,7 @@ class CheckInDialog(BaseDialog):
         temp = AppData(items=self.data.items,
                        checkpoints=[c for c in self.data.checkpoints if c.date != d],
                        settings=self.data.settings)
-        f = Forecast(temp, d)
+        f = self.builder(data=temp, end=d) if self.builder else Forecast(temp, d)
         todays = [o for i in self.data.items for o in occurrences(i, d, d)]
         before = f.balance_before(d)
         after = f.balance_on(d)
@@ -332,4 +329,253 @@ class WelcomeDialog(BaseDialog):
         self.result_checkpoint = Checkpoint(date=from_qdate(self.when.date()), balance=self.balance.cents(),
                                             includes_today=self.includes.isChecked(), note="Starting balance")
         self.result_account = self.account.text().strip() or "Chequing"
+        super().accept()
+
+
+# --------------------------------------------------------------------------
+class DebtDialog(BaseDialog):
+    """Add or edit a credit card, line of credit or loan."""
+
+    PRESETS = {  # kind -> (min $, min %, plus interest)
+        "credit_card": (1000, 1.0, True),
+        "line_of_credit": (0, 0.0, True),
+        "loan": (0, 0.0, False),
+    }
+
+    def __init__(self, data: AppData, debt=None, parent=None):
+        from ..models import DEBT_KINDS
+        super().__init__("Edit debt" if debt else "Add a debt",
+                         "Enter what you owe today and the interest rate from your latest statement.", parent)
+        self.data = data
+        self.debt = debt
+        self.setMinimumWidth(540)
+
+        self.kind = QComboBox()
+        for k, v in DEBT_KINDS.items():
+            self.kind.addItem(v, k)
+        self.name = QLineEdit(debt.name if debt else "")
+        self.name.setPlaceholderText("e.g. Visa, TD Line of Credit, Car loan")
+        self.balance = MoneySpin()
+        self.apr = QDoubleSpinBox()
+        self.apr.setRange(0, 99.99)
+        self.apr.setDecimals(2)
+        self.apr.setSuffix(" %")
+        self.apr.setButtonSymbols(QDoubleSpinBox.NoButtons)
+        self.apr.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.apr.setMinimumWidth(110)
+        self.limit = MoneySpin()
+        self.due = QSpinBox()
+        self.due.setRange(1, 31)
+        self.min_amount = MoneySpin()
+        self.min_amount.setMinimumWidth(120)
+        self.min_pct = QDoubleSpinBox()
+        self.min_pct.setRange(0, 100)
+        self.min_pct.setDecimals(2)
+        self.min_pct.setSuffix(" %")
+        self.min_pct.setButtonSymbols(QDoubleSpinBox.NoButtons)
+        self.min_pct.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.plus_int = QCheckBox("plus that month's interest")
+        self.linked = QComboBox()
+        self.linked.addItem("None — the plan will schedule the payments", "")
+        for it in data.items:
+            if it.kind == BILL:
+                self.linked.addItem(f"{it.name} ({money.fmt(it.amount)} {FREQUENCIES[it.frequency].lower()})", it.id)
+        self.notes = QLineEdit(debt.notes if debt else "")
+
+        if debt:
+            self.kind.setCurrentIndex(list(DEBT_KINDS).index(debt.kind))
+            self.balance.set_cents(debt.balance)
+            self.apr.setValue(debt.apr)
+            self.limit.set_cents(debt.credit_limit)
+            self.due.setValue(debt.due_day)
+            self.min_amount.set_cents(debt.min_amount)
+            self.min_pct.setValue(debt.min_percent)
+            self.plus_int.setChecked(debt.min_plus_interest)
+            i = self.linked.findData(debt.linked_bill_id)
+            self.linked.setCurrentIndex(max(0, i))
+        else:
+            self.due.setValue(date.today().day)
+            self._preset()
+        self.kind.currentIndexChanged.connect(lambda: (not self.debt) and self._preset())
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight)
+        form.setVerticalSpacing(10)
+        form.setHorizontalSpacing(14)
+        form.addRow("Type", self.kind)
+        form.addRow("Name", self.name)
+        form.addRow("Balance owed", hbox(self.balance, None))
+        form.addRow("Interest rate", hbox(self.apr, label("yearly (APR)", "Hint"), None))
+        self.limit_label = QLabel("Credit limit")
+        form.addRow(self.limit_label, hbox(self.limit, label("optional", "Hint"), None))
+        form.addRow("Payment due day", hbox(self.due, label("of each month (31 = last day)", "Hint"), None))
+        form.addRow("Minimum payment", hbox(self.min_amount, label("or", "Muted"), self.min_pct,
+                                             label("of the balance", "Muted"), None, spacing=8))
+        form.addRow("", self.plus_int)
+        form.addRow("Already a bill?", self.linked)
+        form.addRow("Notes", self.notes)
+        self.outer.addLayout(form)
+        self.outer.addWidget(label("“Already a bill?” — if you added this payment under Income & Bills, "
+                                   "pick it so it isn't counted twice; the plan's payments replace it.",
+                                   "Hint", wrap=True))
+        self.info = label("", "Hint", wrap=True)
+        self.outer.addWidget(self.info)
+        self.add_buttons("Save" if debt else "Add debt")
+        for sig in (self.balance.valueChanged, self.apr.valueChanged, self.min_amount.valueChanged,
+                    self.min_pct.valueChanged, self.plus_int.toggled, self.kind.currentIndexChanged):
+            sig.connect(self._refresh)
+        self._refresh()
+        self.name.setFocus()
+
+    def _preset(self):
+        amt, pct, plus = self.PRESETS[self.kind.currentData()]
+        self.min_amount.set_cents(amt)
+        self.min_pct.setValue(pct)
+        self.plus_int.setChecked(plus)
+
+    def _build(self):
+        from ..models import Debt
+        d = Debt(name=self.name.text().strip(), balance=self.balance.cents(), apr=self.apr.value(),
+                 kind=self.kind.currentData(), due_day=self.due.value(), min_amount=self.min_amount.cents(),
+                 min_percent=self.min_pct.value(), min_plus_interest=self.plus_int.isChecked(),
+                 credit_limit=self.limit.cents(), linked_bill_id=self.linked.currentData() or "",
+                 notes=self.notes.text().strip())
+        if self.debt:
+            d.id = self.debt.id
+            d.updated_on = date.today() if d.balance != self.debt.balance else self.debt.updated_on
+        return d
+
+    def _refresh(self):
+        from ..debts import minimum_payment
+        is_loan = self.kind.currentData() == "loan"
+        self.limit.setVisible(not is_loan)
+        self.limit_label.setVisible(not is_loan)
+        d = self._build()
+        interest = d.balance * d.apr / 1200
+        mp = minimum_payment(d, d.balance + interest, interest)
+        col = theme.colors()
+        text = (f"Interest this month ≈ {money.fmt(round(interest))} · minimum payment ≈ "
+                f"{money.fmt(round(mp))}")
+        if d.balance and mp <= interest + 0.5:
+            text += "  —  ⚠ the minimum only covers interest, so this balance would never go down."
+            self.info.setStyleSheet(f"color: {col['warning']};")
+        else:
+            self.info.setStyleSheet("")
+        self.info.setText(text)
+
+    def accept(self):
+        if not self.name.text().strip():
+            QMessageBox.warning(self, "Missing name", "Please give this debt a name.")
+            return
+        self.result_debt = self._build()
+        super().accept()
+
+
+# --------------------------------------------------------------------------
+class AffordDialog(BaseDialog):
+    """'Can I afford it?' — test a one-time purchase against the forecast."""
+
+    def __init__(self, data: AppData, builder, today: date, parent=None):
+        super().__init__("Can I afford it?",
+                         "Try a purchase before you make it. Balance Tracker checks every day ahead "
+                         "to see whether you'd stay above your cushion.", parent)
+        self.data = data
+        # Judge purchases against minimum debt payments only: in "auto" mode the debt plan
+        # soaks up all spare money, and it shrinks its extra payments to fit new purchases.
+        self.builder = lambda **kw: builder(debt_extras=False, **kw)
+        self.plan_note = bool(data.debts) and data.settings.debt_in_forecast and data.settings.debt_mode == "auto"
+        self.today = today
+        self.setMinimumWidth(520)
+        self.name = QLineEdit()
+        self.name.setPlaceholderText("What is it? e.g. New tires")
+        self.amount = MoneySpin()
+        self.when = date_edit(today)
+        self.when.setMinimumDate(to_qdate(today))
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight)
+        form.setVerticalSpacing(10)
+        form.addRow("Purchase", self.name)
+        form.addRow("Amount", hbox(self.amount, None))
+        form.addRow("On", hbox(self.when, None))
+        self.outer.addLayout(form)
+
+        box = QFrame()
+        box.setObjectName("Card")
+        bl = QVBoxLayout(box)
+        bl.setContentsMargins(16, 14, 16, 14)
+        self.verdict = label("", "StatValue", wrap=True)
+        self.detail = label("", "Muted", wrap=True)
+        self.tip = label("", "Hint", wrap=True)
+        for w in (self.verdict, self.detail, self.tip):
+            bl.addWidget(w)
+        self.outer.addWidget(box)
+        bb = self.add_buttons("Add it as a one-time bill")
+        bb.button(QDialogButtonBox.Cancel).setText("Close")
+        self.amount.valueChanged.connect(self._refresh)
+        self.when.dateChanged.connect(self._refresh)
+        self._refresh()
+        self.amount.setFocus()
+
+    def _refresh(self):
+        from ..forecast import horizon_end
+        cents = self.amount.cents()
+        d = from_qdate(self.when.date())
+        cushion = self.data.settings.low_balance_threshold
+        end = horizon_end(self.data, self.today)
+        item = RecurringItem(name="test", amount=cents, kind=BILL, frequency="once", start_date=d, id="")
+        from ..forecast import Occurrence
+        f = self.builder(extra=[Occurrence(d, d, -cents, item)])
+        low = f.lowest(d, end)
+        col = theme.colors()
+        if low is None:
+            self.verdict.setText("Add a starting balance first")
+            return
+        safe = (self.builder().lowest(d, end) or (d, 0))[1] - cushion
+        if cents == 0:
+            self.verdict.setText(f"You can spend up to {money.fmt(max(0, safe))}")
+            self.verdict.setStyleSheet(f"color: {col['accent']};")
+            self.detail.setText(f"on {d.strftime('%b %d')} and still keep your {money.fmt(cushion)} cushion "
+                                f"through {end.strftime('%B %Y')}.")
+            self.tip.setText("")
+            return
+        if low[1] >= cushion:
+            self.verdict.setText("Yes — you can afford it ✓")
+            self.verdict.setStyleSheet(f"color: {col['positive']};")
+            self.detail.setText(f"Your lowest balance afterwards would be {money.fmt(low[1])} on "
+                                f"{low[0].strftime('%b %d')}, still above your {money.fmt(cushion)} cushion.")
+            self.tip.setText("Your debt plan's extra payments will shrink a little to make room for it."
+                             if self.plan_note else "")
+        elif low[1] >= 0:
+            self.verdict.setText("Tight — it dips into your cushion")
+            self.verdict.setStyleSheet(f"color: {col['warning']};")
+            self.detail.setText(f"Your balance would fall to {money.fmt(low[1])} on {low[0].strftime('%b %d')}.")
+            self.tip.setText(self._later_tip(cents, d, cushion, end))
+        else:
+            self.verdict.setText("Not right now ✕")
+            self.verdict.setStyleSheet(f"color: {col['negative']};")
+            self.detail.setText(f"You'd be overdrawn by {money.fmt(-low[1])} on {low[0].strftime('%b %d')}.")
+            self.tip.setText(self._later_tip(cents, d, cushion, end))
+
+    def _later_tip(self, cents, d, cushion, end):
+        """Find the first later date this purchase would fit."""
+        from ..forecast import Occurrence
+        base = self.builder()
+        day = d + timedelta(days=1)
+        while day <= end:
+            low = base.lowest(day, end)
+            if low and low[1] - cents >= cushion:
+                item = RecurringItem(name="t", amount=cents, kind=BILL, frequency="once", start_date=day, id="")
+                f = self.builder(extra=[Occurrence(day, day, -cents, item)])
+                if f.lowest(day, end)[1] >= cushion:
+                    return f"💡 It would fit if you wait until {day.strftime('%A, %B %d')}."
+            day += timedelta(days=1)
+        return "💡 It doesn't fit within your forecast window without dipping below your cushion."
+
+    def accept(self):
+        if self.amount.cents() <= 0:
+            QMessageBox.information(self, "Enter an amount", "Enter the purchase amount first.")
+            return
+        self.result_item = RecurringItem(
+            name=self.name.text().strip() or "Planned purchase", amount=self.amount.cents(), kind=BILL,
+            frequency="once", start_date=from_qdate(self.when.date()), category="Planned purchase")
         super().accept()

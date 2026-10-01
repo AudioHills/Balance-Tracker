@@ -37,8 +37,16 @@ monthly, yearly…), and Balance Tracker works out every future date and the run
   goes to unplanned spending.
 - **Undo** after deletes and edits. Automatic daily backups (last 30 days kept) and a safety copy
   before every restore.
-- **Keyboard shortcuts:** `Ctrl+1…5` switch pages, `Ctrl+K` check in, `Ctrl+I` add income,
-  `Ctrl+B` add bill.
+- **Debt payoff planner** (Debts tab): add credit cards, lines of credit and loans with their
+  interest rates and minimum-payment rules. The plan pays the highest rate first (or the smallest
+  balance first, if you prefer) and sizes each month's extra payment so your chequing balance never
+  drops below your cushion. It shows your debt-free date, interest saved, the order to pay things
+  off, and a 12-month payment schedule. It can also add the payments to your day-by-day forecast.
+- **Can I afford it?:** test a purchase on any date. It tells you whether you stay above your
+  cushion and, if not, the first date it would fit.
+- **Calendar date pickers:** click any date box to pick a date from a calendar.
+- **Keyboard shortcuts:** `Ctrl+1…6` switch pages, `Ctrl+K` check in, `Ctrl+I` add income,
+  `Ctrl+B` add bill, `Ctrl+D` add debt, `Ctrl+A` "Can I afford it?".
 
 ## Getting the .exe
 
@@ -92,5 +100,6 @@ Code layout:
 | --- | --- |
 | `balance_tracker/models.py` | Data classes (amounts in integer cents) and JSON (de)serialisation |
 | `balance_tracker/forecast.py` | Schedule generation and the day-by-day projection engine |
+| `balance_tracker/debts.py` | Debt payoff simulation and the cushion-aware payment planner |
 | `balance_tracker/storage.py` | Load/save, automatic backups, import/export, CSV |
 | `balance_tracker/ui/` | PySide6 (Qt) interface: theme, pages, dialogs, custom charts |

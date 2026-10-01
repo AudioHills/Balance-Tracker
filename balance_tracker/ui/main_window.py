@@ -12,12 +12,13 @@ from PySide6.QtWidgets import (
 )
 
 from .. import money, storage
+from ..debts import make_plan, plan_start
 from ..forecast import Forecast, projection_end
 from ..models import AppData, BILL, INCOME, Checkpoint, new_id
 from . import theme
-from .dialogs import CheckInDialog, ItemDialog, WelcomeDialog
+from .dialogs import AffordDialog, CheckInDialog, DebtDialog, ItemDialog, WelcomeDialog
 from .icon import app_icon
-from .pages import CheckinsPage, DashboardPage, ItemsPage, LedgerPage, SettingsPage
+from .pages import CheckinsPage, DashboardPage, DebtsPage, ItemsPage, LedgerPage, SettingsPage
 from .widgets import label
 
 
@@ -68,7 +69,7 @@ class Toast(QFrame):
 
 
 class MainWindow(QMainWindow):
-    NAV = ["Dashboard", "Day by day", "Income & Bills", "Check-ins", "Settings"]
+    NAV = ["Dashboard", "Day by day", "Income & Bills", "Debts", "Check-ins", "Settings"]
 
     def __init__(self, store: storage.Store, data: AppData):
         super().__init__()
@@ -80,7 +81,7 @@ class MainWindow(QMainWindow):
         money.set_symbol(data.settings.currency_symbol)
         self.setWindowTitle("Balance Tracker")
         self.setWindowIcon(app_icon())
-        self.resize(1320, 880)
+        self.resize(1320, 900)
         self.setMinimumSize(1020, 680)
         self.recompute()
 
@@ -93,8 +94,8 @@ class MainWindow(QMainWindow):
         h.addWidget(self.stack, 1)
         self.setCentralWidget(root)
 
-        self.pages = [DashboardPage(self), LedgerPage(self), ItemsPage(self), CheckinsPage(self),
-                      SettingsPage(self)]
+        self.pages = [DashboardPage(self), LedgerPage(self), ItemsPage(self), DebtsPage(self),
+                      CheckinsPage(self), SettingsPage(self)]
         for p in self.pages:
             self.stack.addWidget(p.widget)
         self.toast_w = Toast(self)
@@ -105,6 +106,8 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+K"), self, self.check_in)
         QShortcut(QKeySequence("Ctrl+I"), self, lambda: self.add_item(INCOME))
         QShortcut(QKeySequence("Ctrl+B"), self, lambda: self.add_item(BILL))
+        QShortcut(QKeySequence("Ctrl+D"), self, self.add_debt)
+        QShortcut(QKeySequence("Ctrl+A"), self, self.afford)
 
         # Roll the "today" marker over at midnight if the app is left open.
         self.clock = QTimer(self, interval=60_000, timeout=self._tick)
@@ -131,7 +134,7 @@ class MainWindow(QMainWindow):
         v.addLayout(brand)
         v.addSpacing(22)
         self.nav_btns = []
-        glyphs = ["◉", "☰", "⇅", "✓", "⚙"]
+        glyphs = ["◉", "☰", "⇅", "◈", "✓", "⚙"]
         for i, (name, g) in enumerate(zip(self.NAV, glyphs)):
             b = QPushButton(f"{g}   {name}".replace("&", "&&"))
             b.setObjectName("NavButton")
@@ -174,10 +177,24 @@ class MainWindow(QMainWindow):
 
     # ---- state ---------------------------------------------------------
     def recompute(self):
-        end = projection_end(self.data, self.today)
-        if self._ledger_end and self._ledger_end > end:
-            end = self._ledger_end
-        self.forecast = Forecast(self.data, end, self.today)
+        self.plan = make_plan(self.data, self.today) if self.data.debts and self.data.has_start else None
+        self.forecast = self.build_forecast()
+
+    def build_forecast(self, extra=None, data: AppData | None = None, end: date | None = None,
+                       debt_extras: bool = True) -> Forecast:
+        """The day-by-day forecast, including planned debt payments when that option is on."""
+        data = data or self.data
+        if end is None:
+            end = projection_end(self.data, self.today)
+            if self._ledger_end and self._ledger_end > end:
+                end = self._ledger_end
+        extra = list(extra or [])
+        suppress = {}
+        if self.plan is not None and self.data.settings.debt_in_forecast:
+            extra += self.plan.occurrences(self.data.debts, include_extra=debt_extras)
+            start = plan_start(self.data, self.today)
+            suppress = {d.linked_bill_id: start for d in self.data.debts if d.linked_bill_id}
+        return Forecast(data, end, self.today, extra=extra, suppress=suppress)
 
     def extend_forecast(self, end: date):
         self._ledger_end = end
@@ -242,7 +259,7 @@ class MainWindow(QMainWindow):
         if not self.data.has_start:
             self.first_run()
             return
-        dlg = CheckInDialog(self.data, self.today, self)
+        dlg = CheckInDialog(self.data, self.today, self, builder=self.build_forecast)
         if dlg.exec():
             cp = dlg.result_checkpoint
             if cp.date == self.data.start.date:
@@ -297,6 +314,37 @@ class MainWindow(QMainWindow):
     def clear_override(self, item, key: str):
         item.overrides.pop(key, None)
         self.commit(toast="Restored")
+
+    def afford(self):
+        if not self.data.has_start:
+            self.first_run()
+            return
+        dlg = AffordDialog(self.data, self.build_forecast, self.today, self)
+        if dlg.exec():
+            self.data.items.append(dlg.result_item)
+            self.commit(toast=f"Added “{dlg.result_item.name}” as a one-time bill")
+
+    def add_debt(self):
+        dlg = DebtDialog(self.data, parent=self)
+        if dlg.exec():
+            self.data.debts.append(dlg.result_debt)
+            self.commit(toast=f"Added “{dlg.result_debt.name}”")
+
+    def edit_debt(self, debt_id: str):
+        debt = self.data.debt(debt_id)
+        if not debt:
+            return
+        dlg = DebtDialog(self.data, debt, parent=self)
+        if dlg.exec():
+            self.snapshot()
+            self.data.debts[self.data.debts.index(debt)] = dlg.result_debt
+            self.commit(toast="Debt updated — plan recalculated", undoable=True)
+
+    def delete_debt(self, debt_id: str):
+        debt = self.data.debt(debt_id)
+        self.snapshot()
+        self.data.debts.remove(debt)
+        self.commit(toast=f"Deleted “{debt.name}”", undoable=True)
 
     def delete_checkpoint(self, cp_id: str):
         cp = next((c for c in self.data.checkpoints if c.id == cp_id), None)

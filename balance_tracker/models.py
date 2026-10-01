@@ -37,6 +37,17 @@ WEEKEND_RULES = {
 
 LAST_DAY = 31  # day-of-month value meaning "last day of the month"
 
+DEBT_KINDS = {
+    "credit_card": "Credit card",
+    "line_of_credit": "Line of credit",
+    "loan": "Loan",
+}
+
+DEBT_STRATEGIES = {
+    "avalanche": "Highest interest first",
+    "snowball": "Smallest balance first",
+}
+
 
 def new_id() -> str:
     return uuid.uuid4().hex[:12]
@@ -145,6 +156,50 @@ class Checkpoint:
 
 
 @dataclass
+class Debt:
+    """A credit card, line of credit or loan being paid down."""
+
+    name: str
+    balance: int  # cents owed (positive)
+    apr: float  # annual interest rate, percent (e.g. 19.99)
+    kind: str = "credit_card"
+    due_day: int = 1  # payment day of month (31 = last day)
+    # Minimum payment = max(min_amount, min_percent% of balance [+ interest])
+    min_amount: int = 1000
+    min_percent: float = 0.0
+    min_plus_interest: bool = True
+    credit_limit: int = 0  # cents; 0 = not set
+    linked_bill_id: str = ""  # an Income & Bills entry that already pays this debt
+    updated_on: date = field(default_factory=date.today)
+    notes: str = ""
+    id: str = field(default_factory=new_id)
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        d["updated_on"] = self.updated_on.isoformat()
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Debt":
+        kind = d.get("kind", "credit_card")
+        return cls(
+            id=str(d.get("id") or new_id()),
+            name=str(d["name"]),
+            balance=max(0, int(d.get("balance", 0))),
+            apr=max(0.0, float(d.get("apr", 0))),
+            kind=kind if kind in DEBT_KINDS else "credit_card",
+            due_day=min(31, max(1, int(d.get("due_day", 1)))),
+            min_amount=max(0, int(d.get("min_amount", 0))),
+            min_percent=max(0.0, float(d.get("min_percent", 0))),
+            min_plus_interest=bool(d.get("min_plus_interest", True)),
+            credit_limit=max(0, int(d.get("credit_limit", 0))),
+            linked_bill_id=str(d.get("linked_bill_id") or ""),
+            updated_on=_d(d.get("updated_on")) or date.today(),
+            notes=str(d.get("notes", "")),
+        )
+
+
+@dataclass
 class Settings:
     theme: str = "system"  # system | light | dark
     currency_symbol: str = "$"
@@ -152,6 +207,11 @@ class Settings:
     forecast_months: int = 6
     prompt_on_open: bool = True
     account_name: str = "Chequing"
+    # Debt payoff plan
+    debt_strategy: str = "avalanche"
+    debt_mode: str = "auto"  # auto = as much as the cushion allows; fixed = debt_fixed_extra per month
+    debt_fixed_extra: int = 0  # cents per month
+    debt_in_forecast: bool = False  # add the plan's payments to the day-by-day forecast
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -165,6 +225,10 @@ class Settings:
         if s.theme not in ("system", "light", "dark"):
             s.theme = "system"
         s.forecast_months = max(1, min(36, s.forecast_months))
+        if s.debt_strategy not in DEBT_STRATEGIES:
+            s.debt_strategy = "avalanche"
+        if s.debt_mode not in ("auto", "fixed"):
+            s.debt_mode = "auto"
         return s
 
 
@@ -172,6 +236,7 @@ class Settings:
 class AppData:
     items: list = field(default_factory=list)  # list[RecurringItem]
     checkpoints: list = field(default_factory=list)  # list[Checkpoint]
+    debts: list = field(default_factory=list)  # list[Debt]
     settings: Settings = field(default_factory=Settings)
 
     # ---- convenience -------------------------------------------------
@@ -195,6 +260,9 @@ class AppData:
     def item(self, item_id: str) -> Optional[RecurringItem]:
         return next((i for i in self.items if i.id == item_id), None)
 
+    def debt(self, debt_id: str) -> Optional[Debt]:
+        return next((d for d in self.debts if d.id == debt_id), None)
+
     def add_checkpoint(self, cp: Checkpoint) -> None:
         """Add a checkpoint, replacing any other checkpoint on the same day."""
         self.checkpoints = [c for c in self.checkpoints if c.date != cp.date]
@@ -212,6 +280,7 @@ class AppData:
             "settings": self.settings.to_dict(),
             "items": [i.to_dict() for i in self.items],
             "checkpoints": [c.to_dict() for c in self.sorted_checkpoints()],
+            "debts": [d.to_dict() for d in self.debts],
         }
 
     @classmethod
@@ -223,5 +292,6 @@ class AppData:
         return cls(
             items=[RecurringItem.from_dict(i) for i in d.get("items", [])],
             checkpoints=[Checkpoint.from_dict(c) for c in d.get("checkpoints", [])],
+            debts=[Debt.from_dict(x) for x in d.get("debts", [])],
             settings=Settings.from_dict(d.get("settings", {})),
         )

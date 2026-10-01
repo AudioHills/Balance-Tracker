@@ -1,8 +1,11 @@
 """Light/dark colour palettes and the application stylesheet."""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QGuiApplication, QPalette
+import tempfile
+from pathlib import Path
+
+from PySide6.QtCore import QPointF, Qt
+from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter, QPainterPath, QPalette, QPen
 
 LIGHT = {
     "bg": "#F3F5FA", "surface": "#FFFFFF", "surface2": "#F0F2F8", "border": "#E2E6EF",
@@ -38,6 +41,26 @@ def system_is_dark() -> bool:
         return False
 
 
+def _arrow_image(color: str) -> str:
+    """Write a small chevron PNG for combo-box arrows and return its path (QSS needs a file)."""
+    folder = Path(tempfile.gettempdir()) / "BalanceTracker-ui"
+    folder.mkdir(exist_ok=True)
+    path = folder / f"chevron-{color.strip('#')}.png"
+    if not path.exists():
+        img = QImage(24, 24, QImage.Format_ARGB32)
+        img.fill(Qt.transparent)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(QPen(QColor(color), 2.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        path_ = QPainterPath(QPointF(6, 9))
+        path_.lineTo(12, 15)
+        path_.lineTo(18, 9)
+        p.drawPath(path_)
+        p.end()
+        img.save(str(path))
+    return path.as_posix()
+
+
 def apply_theme(app, mode: str) -> None:
     dark = system_is_dark() if mode == "system" else mode == "dark"
     _current.clear()
@@ -58,7 +81,11 @@ def apply_theme(app, mode: str) -> None:
     pal.setColor(QPalette.ToolTipText, QColor(p["text"]))
     pal.setColor(QPalette.PlaceholderText, QColor(p["muted"]))
     app.setPalette(pal)
-    app.setStyleSheet(STYLESHEET.format(**p))
+    try:
+        arrow = _arrow_image(p["muted"])
+    except OSError:
+        arrow = ""
+    app.setStyleSheet(STYLESHEET.format(arrow=arrow, **p))
 
 
 STYLESHEET = """
@@ -111,20 +138,42 @@ QPushButton#Chip {{ border-radius: 14px; padding: 5px 12px; }}
 QPushButton#Chip:checked {{ background: {accent_soft}; color: {accent}; border-color: {accent}; }}
 
 /* ---------- inputs ---------- */
-QLineEdit, QComboBox, QDateEdit, QSpinBox, QDoubleSpinBox, QPlainTextEdit {{
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit {{
     background: {surface}; border: 1px solid {border}; border-radius: 8px; padding: 6px 8px;
     selection-background-color: {selection};
 }}
-QLineEdit:focus, QComboBox:focus, QDateEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QPlainTextEdit:focus {{
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QPlainTextEdit:focus {{
     border: 1px solid {accent};
 }}
-QComboBox::drop-down, QDateEdit::drop-down {{ border: none; width: 22px; }}
+QComboBox::drop-down {{ border: none; width: 26px; }}
+QComboBox::down-arrow {{ image: url("{arrow}"); width: 14px; height: 14px; }}
 QComboBox QAbstractItemView {{ background: {surface}; border: 1px solid {border}; selection-background-color: {selection}; }}
 QSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{ width: 0; border: none; }}
 QCheckBox {{ spacing: 8px; }}
-QCalendarWidget QWidget {{ alternate-background-color: {surface2}; }}
-QCalendarWidget QToolButton {{ color: {text}; background: transparent; padding: 4px 8px; }}
-QCalendarWidget #qt_calendar_navigationbar {{ background: {surface2}; }}
+QPushButton#DateField {{
+    text-align: left; font-weight: 500; padding: 6px 10px; border-radius: 8px;
+    background: {surface}; border: 1px solid {border};
+}}
+QPushButton#DateField:hover {{ border-color: {accent}; background: {surface}; }}
+#CalendarPopup {{ background: {surface}; border: 1px solid {border}; border-radius: 12px; }}
+QCalendarWidget QWidget {{ alternate-background-color: {surface}; background: {surface}; }}
+QCalendarWidget #qt_calendar_navigationbar {{ background: {surface}; padding: 2px; }}
+QCalendarWidget QToolButton {{
+    color: {text}; background: transparent; padding: 6px 10px; border-radius: 8px;
+    font-weight: 700; font-size: 11pt;
+}}
+QCalendarWidget QToolButton:hover {{ background: {surface2}; }}
+QCalendarWidget QToolButton::menu-indicator {{ image: none; width: 0; }}
+QCalendarWidget #qt_calendar_prevmonth, QCalendarWidget #qt_calendar_nextmonth {{ qproperty-icon: none; min-width: 28px; }}
+QCalendarWidget #qt_calendar_prevmonth {{ qproperty-text: "‹"; font-size: 16pt; }}
+QCalendarWidget #qt_calendar_nextmonth {{ qproperty-text: "›"; font-size: 16pt; }}
+QCalendarWidget QSpinBox {{ min-width: 70px; }}
+QCalendarWidget QAbstractItemView {{
+    background: {surface}; color: {text}; outline: 0; font-size: 10pt;
+    selection-background-color: {accent}; selection-color: white;
+}}
+QCalendarWidget QAbstractItemView:disabled {{ color: {border}; }}
+QCalendarWidget QTableView::item {{ padding: 0; }}
 
 /* ---------- tables ---------- */
 QTableView {{

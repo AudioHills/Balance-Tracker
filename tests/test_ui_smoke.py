@@ -61,7 +61,7 @@ def test_full_flow(app, tmp_path, monkeypatch):
     w.pages[1].every_day.setChecked(False)
     w.pages[1].every_day.setChecked(True)
     w.show_day(today + timedelta(days=200))
-    for i in range(5):
+    for i in range(6):
         w.go(i)
         app.processEvents()
 
@@ -71,7 +71,7 @@ def test_full_flow(app, tmp_path, monkeypatch):
     assert storage.read_backup(out).items[0].name == "Pay"
 
     # settings -> dark theme
-    sp = w.pages[4]
+    sp = w.pages[5]
     sp.theme.setCurrentIndex(2)
     assert w.data.settings.theme == "dark"
     assert store.load().settings.theme == "dark"
@@ -86,3 +86,52 @@ def test_checkin_dialog_math(app):
     dlg.balance.set_cents(90000)
     dlg.accept()
     assert dlg.result_checkpoint.balance == 90000
+
+
+def test_debts_and_afford(app, tmp_path, monkeypatch):
+    from balance_tracker.models import Debt, RecurringItem
+    t = date.today()
+    data = AppData()
+    data.checkpoints.append(Checkpoint(t, 300000))
+    data.items.append(RecurringItem("Pay", 250000, INCOME, "biweekly", t + timedelta(days=2)))
+    data.items.append(RecurringItem("Rent", 150000, BILL, "monthly", t + timedelta(days=5)))
+    w = MainWindow(storage.Store(tmp_path), data)
+
+    def debt_exec(self):
+        self.name.setText("Visa")
+        self.balance.set_cents(250000)
+        self.apr.setValue(19.99)
+        self.accept()
+        return True
+    monkeypatch.setattr(dialogs.DebtDialog, "exec", debt_exec)
+    w.add_debt()
+    assert w.plan is not None and w.plan.debt_free is not None
+    page = w.pages[3]
+    page.in_forecast.setChecked(True)
+    assert any("Visa" in e.description for e in w.forecast.entries)
+    assert w.forecast.lowest(t, t + timedelta(days=365))[1] >= data.settings.low_balance_threshold
+    page.mode.setCurrentIndex(1)
+    page.fixed.set_cents(10000)
+    page.save_plan()
+    assert w.data.settings.debt_mode == "fixed"
+    w.go(3)
+    app.processEvents()
+
+    dlg = dialogs.AffordDialog(w.data, w.build_forecast, t, w)
+    dlg.amount.set_cents(10_000_000)
+    assert "Not" in dlg.verdict.text()
+    dlg.amount.set_cents(100)
+    assert "Yes" in dlg.verdict.text()
+
+
+def test_date_field_popup(app):
+    from PySide6.QtCore import QDate
+    from balance_tracker.ui.widgets import DateField
+    f = DateField(QDate(2026, 10, 1))
+    seen = []
+    f.dateChanged.connect(seen.append)
+    f.open_calendar()
+    f._popup._pick(QDate(2026, 10, 15))
+    assert f.date() == QDate(2026, 10, 15) and seen and not f._popup.isVisible()
+    f.setMinimumDate(QDate(2026, 11, 1))
+    assert f.date() == QDate(2026, 11, 1)
