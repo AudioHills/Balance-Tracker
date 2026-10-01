@@ -290,6 +290,7 @@ export const projectionEnd = (data, today) => addMonths(today, Math.max(12, data
 
 // ---------------------------------------------------------------- debts
 const MONTHS = 120;
+const MIN_EXTRA = 2000; // no extra payments under $20 (unless it clears the debt)
 export function minimumPayment(debt, balance, interest) {
   let pct = (balance * debt.min_percent) / 100;
   if (debt.min_plus_interest) pct += interest;
@@ -305,6 +306,7 @@ export class Plan {
   constructor(strategy) {
     this.strategy = strategy; this.payments = []; this.payoff = new Map(); this.interest = new Map();
     this.totals = []; this.extraDates = new Map(); this.remainingAfterMin = new Map(); this.extras = new Map(); this.order = [];
+    this.owedAfter = []; // [[date, total owed]] after each payment event
   }
   get totalInterest() { let s = 0; for (const v of this.interest.values()) s += v; return s; }
   get debtFree() {
@@ -342,7 +344,9 @@ export class Plan {
   }
 }
 
-export function simulate(debts, today, strategy, extras, months = MONTHS, rollover = false) {
+// `dated`: [[date, cents]] extra payments on specific days (auto mode: as soon as it's safe)
+export function simulate(debts, today, strategy, extras, months = MONTHS, rollover = false, dated = []) {
+  dated = [...dated].sort((a, b) => cmpTuple(a, b));
   const plan = new Plan(strategy);
   plan.extras = new Map(extras);
   const bals = new Map(debts.map((d) => [d.id, d.balance]));
@@ -355,11 +359,31 @@ export function simulate(debts, today, strategy, extras, months = MONTHS, rollov
   for (let m = 0; m < months; m++) {
     if ([...bals.values()].every((b) => b <= 0.5)) break;
     const first = addMonths(month0, m, 1);
+    const nxt = addMonths(month0, m + 1, 1);
     const F = ymd(first);
     const due = new Map(debts.map((d) => [d.id, clampDay(F.y, F.m, d.due_day)]));
     const lastMin = new Map();
     const byDue = [...debts].sort((a, b) => due.get(a.id) - due.get(b.id));
-    for (const d of byDue) {
+    // this month's events in date order; on the same day the minimum comes before an extra
+    const events = byDue.map((d, i) => [due.get(d.id), 0, i, d]);
+    dated.forEach(([when, amt], i) => { if (first <= when && when < nxt && when >= today) events.push([when, 1, i, amt]); });
+    events.sort((a, b) => cmpTuple(a.slice(0, 3), b.slice(0, 3)));
+    for (const [when, kind, , obj] of events) {
+      if (kind === 1) {
+        let extra = obj;
+        for (const d of orderDebts(debts, bals, strategy)) {
+          if (extra <= 0) break;
+          const pay = Math.min(extra, pyRound(bals.get(d.id)));
+          if (pay <= 0) continue;
+          plan.payments.push({ date: when, debt_id: d.id, amount: pay, extra: true });
+          bals.set(d.id, bals.get(d.id) - pay);
+          extra -= pay;
+          if (bals.get(d.id) <= 0.5) { bals.set(d.id, 0); plan.payoff.set(d.id, when); }
+        }
+        plan.owedAfter.push([when, pyRound(sumBals())]);
+        continue;
+      }
+      const d = obj;
       let bal = bals.get(d.id);
       if (bal <= 0.5 || due.get(d.id) < today) continue;
       const interest = (bal * d.apr) / 1200;
@@ -372,6 +396,7 @@ export function simulate(debts, today, strategy, extras, months = MONTHS, rollov
       lastMin.set(d.id, pay);
       if (bal <= 0.5) { bal = 0; plan.payoff.set(d.id, due.get(d.id)); freed += pay; }
       bals.set(d.id, bal);
+      plan.owedAfter.push([due.get(d.id), pyRound(sumBals())]);
     }
     const order = orderDebts(debts, bals, strategy);
     if (order.length) {
@@ -423,6 +448,7 @@ export function makePlan(data, today, strategy = null, mode = null) {
     if (s.debt_fixed_extra > 0) for (let m = 0; m < MONTHS; m++) extras.set(m, s.debt_fixed_extra);
     return simulate(debts, today, strategy, extras, MONTHS, true);
   }
+  // auto: pay extra as soon as it's safe — today, then each payday
   const base = baseForecast(data, baseToday);
   const days = [];
   for (let d = today; d <= base.end; d++) { const v = base.daily.get(d); if (v !== undefined) days.push([d, v]); }
@@ -430,11 +456,13 @@ export function makePlan(data, today, strategy = null, mode = null) {
   const index = new Map(days.map(([d], i) => [d, i]));
   const n = days.length;
   const cushion = s.low_balance_threshold;
-  const extras = new Map();
-  let plan = simulate(debts, today, strategy, extras);
-  for (let m = 0; m < MONTHS; m++) {
-    const when = plan.extraDates.get(m);
-    if (when === undefined || when > days[n - 1][0]) break;
+  const lastDay = days[n - 1][0];
+  const candidates = [...new Set([today, ...base.entries.filter((e) => e.kind === "income" && today <= e.date && e.date <= lastDay).map((e) => e.date)])].sort((a, b) => a - b);
+  const initialOwed = debts.reduce((a, d) => a + d.balance, 0);
+  const dated = [];
+  let plan = simulate(debts, today, strategy, new Map());
+  for (const when of candidates) {
+    if (plan.debtFree !== null && plan.debtFree < when) break;
     const spent = new Array(n).fill(0);
     for (const p of plan.payments) { const i = index.get(p.date); if (i !== undefined) spent[i] += p.amount; }
     let run = 0, low = null;
@@ -443,10 +471,14 @@ export function makePlan(data, today, strategy = null, mode = null) {
       run += spent[i];
       if (i >= startI) { const v = days[i][1] - run; if (low === null || v < low) low = v; }
     }
+    let owed = initialOwed;
+    for (const [at, total] of plan.owedAfter) { if (at > when) break; owed = total; }
     const avail = low - cushion;
-    const owed = plan.remainingAfterMin.get(m) || 0;
     const room = avail >= owed ? owed : roundDown(avail);
-    if (room > 0) { extras.set(m, room); plan = simulate(debts, today, strategy, extras); }
+    if (room >= MIN_EXTRA || (room > 0 && room === owed)) {
+      dated.push([when, room]);
+      plan = simulate(debts, today, strategy, new Map(), MONTHS, false, dated);
+    }
   }
   return plan;
 }

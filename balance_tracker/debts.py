@@ -6,10 +6,12 @@ payment on its due day) and puts any extra money toward one debt at a time:
 * avalanche - highest interest rate first (saves the most interest)
 * snowball  - smallest balance first (quickest wins)
 
-In "auto" mode the extra amount for each month is the most that can be paid
-while the projected chequing balance never drops below the user's cushion on
-any later day. It is found greedily: month by month, given everything already
-planned, extra = (lowest future chequing balance) - cushion.
+In "auto" mode extra payments are made as soon as it is safe: on the plan's first
+day and then on each payday, the planner pays the most it can while the projected
+chequing balance stays at or above the user's cushion on EVERY later day (all future
+bills and minimum payments included). Working forward in time, each payment is sized
+with all earlier ones already accounted for:
+    extra(day) = (lowest chequing balance from that day on) - cushion.
 """
 from __future__ import annotations
 
@@ -18,10 +20,11 @@ from datetime import date, timedelta
 from typing import Optional
 
 from .forecast import Forecast, Occurrence, add_months, clamp_day
-from .models import AppData, BILL, Debt, RecurringItem
+from .models import AppData, BILL, INCOME, Debt, RecurringItem
 
 YEARS = 10
 MONTHS = YEARS * 12
+MIN_EXTRA = 2000  # don't schedule extra payments smaller than $20 (unless it clears the debt)
 
 
 @dataclass
@@ -41,6 +44,7 @@ class Plan:
     totals: list = field(default_factory=list)  # [(date, total owed)] after each month
     extra_dates: dict = field(default_factory=dict)  # month index -> date extra would be paid
     remaining_after_min: dict = field(default_factory=dict)  # month index -> cents still owed
+    owed_after: list = field(default_factory=list)  # [(date, total owed)] after each payment event
     extras: dict = field(default_factory=dict)  # month index -> planned extra (cents)
     order: list = field(default_factory=list)  # debt ids in the order they get extra money
 
@@ -106,9 +110,12 @@ def _order(debts, bals, strategy):
 
 
 def simulate(debts: list, today: date, strategy: str, extras: dict, months: int = MONTHS,
-             rollover: bool = False) -> Plan:
-    """Run the month-by-month payoff. `extras`: month index -> extra cents.
-    With `rollover`, minimums freed up by paid-off debts are added to the extra."""
+             rollover: bool = False, dated: Optional[list] = None) -> Plan:
+    """Run the month-by-month payoff.
+    `extras`: month index -> extra cents, paid on the first target's due date (fixed mode).
+    `dated`: [(date, cents)] extra payments on specific days (auto mode: as soon as it's safe).
+    With `rollover`, minimums freed up by paid-off debts are added to the monthly extra."""
+    dated = sorted(dated or [])
     plan = Plan(strategy=strategy, extras=dict(extras))
     bals = {d.id: float(d.balance) for d in debts}
     plan.interest = {d.id: 0 for d in debts}
@@ -122,9 +129,30 @@ def simulate(debts: list, today: date, strategy: str, extras: dict, months: int 
         if all(b <= 0.5 for b in bals.values()):
             break
         first = add_months(month0, m, 1)
+        nxt = add_months(month0, m + 1, 1)
         due = {d.id: clamp_day(first.year, first.month, d.due_day) for d in debts}
         last_min = {}
-        for d in sorted(debts, key=lambda d: due[d.id]):
+        # this month's events in date order; on the same day the minimum comes before an extra
+        events = [(due[d.id], 0, i, d) for i, d in enumerate(sorted(debts, key=lambda d: due[d.id]))]
+        events += [(when, 1, i, amt) for i, (when, amt) in enumerate(dated) if first <= when < nxt and when >= today]
+        for when, kind, _, obj in sorted(events, key=lambda e: (e[0], e[1], e[2])):
+            if kind == 1:  # a dated extra payment, split by strategy
+                extra = obj
+                for d in _order(debts, bals, strategy):
+                    if extra <= 0:
+                        break
+                    pay = min(extra, round(bals[d.id]))
+                    if pay <= 0:
+                        continue
+                    plan.payments.append(Payment(when, d.id, pay, extra=True))
+                    bals[d.id] -= pay
+                    extra -= pay
+                    if bals[d.id] <= 0.5:
+                        bals[d.id] = 0.0
+                        plan.payoff[d.id] = when
+                plan.owed_after.append((when, round(sum(bals.values()))))
+                continue
+            d = obj
             bal = bals[d.id]
             if bal <= 0.5 or due[d.id] < today:
                 continue
@@ -142,6 +170,7 @@ def simulate(debts: list, today: date, strategy: str, extras: dict, months: int 
                 plan.payoff[d.id] = due[d.id]
                 freed += pay
             bals[d.id] = bal
+            plan.owed_after.append((due[d.id], round(sum(bals.values()))))
 
         order = _order(debts, bals, strategy)
         if order:
@@ -207,7 +236,7 @@ def make_plan(data: AppData, today: date, strategy: Optional[str] = None, mode: 
         extras = {m: s.debt_fixed_extra for m in range(MONTHS)} if s.debt_fixed_extra > 0 else {}
         return simulate(debts, today, strategy, extras, rollover=True)
 
-    # auto: as much as the cushion allows
+    # auto: pay extra as soon as it's safe — today, then each payday
     base = base or base_forecast(data, base_today)
     days = []
     d = today
@@ -221,14 +250,16 @@ def make_plan(data: AppData, today: date, strategy: Optional[str] = None, mode: 
     index = {d: i for i, (d, _) in enumerate(days)}
     n = len(days)
     cushion = s.low_balance_threshold
+    candidates = sorted({today} | {e.date for e in base.entries
+                                   if e.kind == INCOME and today <= e.date <= days[-1][0]})
+    initial_owed = sum(x.balance for x in debts)
 
-    extras: dict = {}
-    plan = simulate(debts, today, strategy, extras)
-    for m in range(MONTHS):
-        when = plan.extra_dates.get(m)
-        if when is None or when > days[-1][0]:
+    dated: list = []
+    plan = simulate(debts, today, strategy, {})
+    for when in candidates:
+        if plan.debt_free is not None and plan.debt_free < when:
             break
-        # cumulative planned payments by day
+        # chequing balance on each day if every payment planned so far is made
         spent = [0] * n
         for p in plan.payments:
             i = index.get(p.date)
@@ -243,12 +274,16 @@ def make_plan(data: AppData, today: date, strategy: Optional[str] = None, mode: 
                 v = days[i][1] - run
                 if low is None or v < low:
                     low = v
+        owed = initial_owed
+        for at, total in plan.owed_after:
+            if at > when:
+                break
+            owed = total
         avail = low - cushion
-        owed = plan.remaining_after_min.get(m, 0)
         room = owed if avail >= owed else _round_down(avail)
-        if room > 0:
-            extras[m] = room
-            plan = simulate(debts, today, strategy, extras)
+        if room >= MIN_EXTRA or (0 < room == owed):
+            dated.append((when, room))
+            plan = simulate(debts, today, strategy, {}, dated=dated)
     return plan
 
 

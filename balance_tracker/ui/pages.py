@@ -1160,8 +1160,11 @@ class DebtsPage:
         nxt = plan.next_extra(today)
         if nxt:
             dname = data.debt(nxt.debt_id).name
-            self.next_action.setText(f"👉  Next: pay {money.fmt(nxt.amount)} extra to {dname} on "
-                                     f"{nxt.date.strftime('%A, %B %d')} (on top of the minimum).")
+            when = "today" if nxt.date == today else ("tomorrow" if nxt.date == today + timedelta(days=1)
+                                                      else "on " + nxt.date.strftime("%A, %B %d"))
+            payday = any(e.kind == INCOME and e.date == nxt.date for e in ctx.forecast.entries)
+            self.next_action.setText(f"👉  Next: pay {money.fmt(nxt.amount)} extra to {dname} {when}"
+                                     f"{' — the day your pay lands' if payday else ''} (on top of the minimum).")
         elif s.debt_mode == "auto":
             self.next_action.setText("No extra money to spare right now — keep paying the minimums. "
                                      "The plan adds extra as soon as your forecast has room above your cushion.")
@@ -1169,7 +1172,8 @@ class DebtsPage:
             self.next_action.setText("Set a fixed extra amount above to speed things up.")
         if s.debt_mode == "auto":
             self.plan_hint.setText(
-                f"Extra payments are sized so your chequing balance never drops below your "
+                f"Extra payments go out as soon as it's safe — usually the day your pay lands — and each is "
+                f"sized by checking every future day, so your balance never drops below your "
                 f"{money.fmt(s.low_balance_threshold)} cushion (change it in Settings). "
                 f"{DEBT_STRATEGIES[s.debt_strategy]} — " +
                 ("saves the most interest." if s.debt_strategy == "avalanche" else "quick wins to keep you motivated."))

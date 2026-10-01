@@ -41,7 +41,8 @@ monthly, yearly…), and Balance Tracker works out every future date and the run
 - **Debt payoff planner** (Debts tab): add credit cards, lines of credit and loans with their
   interest rates and minimum-payment rules. The plan pays the highest rate first (or the smallest
   balance first, if you prefer) and sizes each month's extra payment so your chequing balance never
-  drops below your cushion. It shows your debt-free date, interest saved, the order to pay things
+  drops below your cushion. In *as much as my cushion allows* mode, extra payments go out as soon
+  as it's safe (usually payday), each sized by checking every future day. It shows your debt-free date, interest saved, the order to pay things
   off, and a 12-month payment schedule. It can also add the payments to your day-by-day forecast.
 - **Credit-card bills:** set a bill's *Paid with* to a credit card if it's charged to the card and you
   pay the card off right away. It shows as "Pay Visa: Netflix" in the forecast. Charges from the

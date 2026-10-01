@@ -365,13 +365,16 @@ function viewDebts() {
   if (stale.length) html += `<div class="banner warning">Update your balance for ${esc(stale.map((d) => d.name).join(", "))} — it's been over a month. Tap a debt below to update it from your latest statement.</div>`;
   else if (never.length && !plan.debtFree) html += `<div class="banner warning">${esc(never.map((d) => d.name).join(", "))}: the minimum payment only covers interest. Extra payments are the only way to bring this down.</div>`;
   const nxt = plan.nextExtra(today);
-  html += `<div class="banner info">${nxt ? `👉 Next: pay <b>${money(nxt.amount)}</b> extra to <b>${esc(E.findDebt(data, nxt.debt_id)?.name)}</b> on ${longDate(nxt.date)} (on top of the minimum).`
+  const nxtWhen = nxt ? (nxt.date === today ? "today" : nxt.date === today + 1 ? "tomorrow" : "on " + longDate(nxt.date)) : "";
+  const nxtPayday = nxt && fc.entries.some((e) => e.kind === "income" && e.date === nxt.date);
+  html += `<div class="banner info">${nxt ? `👉 Next: pay <b>${money(nxt.amount)}</b> extra to <b>${esc(E.findDebt(data, nxt.debt_id)?.name)}</b> ${nxtWhen}${nxtPayday ? " — the day your pay lands" : ""} (on top of the minimum).`
     : s.debt_mode === "auto" ? "No spare money right now — keep paying the minimums. Extra kicks in as soon as your forecast has room above your cushion." : "Set a fixed extra amount below to speed things up."}</div>`;
 
   html += `<div class="card"><h2>Your plan</h2>
     <div class="seg" style="margin-bottom:10px">${Object.entries(E.DEBT_STRATEGIES).map(([k, t]) => `<button class="${s.debt_strategy === k ? "on" : ""}" data-act="strategy" data-k="${k}">${t}</button>`).join("")}</div>
     <div class="form" style="margin:0">
       <div class="field"><label>Extra money</label><select id="dmode" data-change="dmode"><option value="auto" ${s.debt_mode === "auto" ? "selected" : ""}>Max my cushion allows</option><option value="fixed" ${s.debt_mode === "fixed" ? "selected" : ""}>Fixed per month</option></select></div>
+      ${s.debt_mode === "auto" ? `<div class="hint" style="padding:10px 14px 0">Extra goes out as soon as it's safe — usually payday — sized so your balance never drops below your ${money(s.low_balance_threshold)} cushion on any later day.</div>` : ""}
       ${s.debt_mode === "fixed" ? `<div class="field"><label>Per month</label><input id="dfixed" inputmode="decimal" placeholder="0.00" value="${moneyInput(s.debt_fixed_extra)}" data-change="dfixed"></div>` : ""}
       <div class="field toggle-row"><label>Show payments in Day by day</label><label class="switch"><input type="checkbox" data-change="dinfc" ${s.debt_in_forecast ? "checked" : ""}><span></span></label></div>
     </div></div>`;

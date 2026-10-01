@@ -156,9 +156,17 @@ def compose(data: AppData, today: date) -> Optional[Digest]:
         for p in plan.payments:
             if p.date in (today, ahead):
                 key = (p.debt_id, p.date)
-                totals[key] = totals.get(key, 0) + p.amount
-        for (debt_id, d), amt in sorted(totals.items(), key=lambda kv: kv[0][1]):
-            lines.append(("🏦", f"{names.get(debt_id, 'Debt')} payment {money.fmt(amt)} due {when(d)}", d == today))
+                mins, extra = totals.get(key, (0, 0))
+                totals[key] = (mins + (0 if p.extra else p.amount), extra + (p.amount if p.extra else 0))
+        for (debt_id, d), (mins, extra) in sorted(totals.items(), key=lambda kv: kv[0][1]):
+            name = names.get(debt_id, "Debt")
+            if mins:
+                text = f"{name} payment {money.fmt(mins + extra)} due {when(d)}"
+                if extra:
+                    text += f" (minimum {money.fmt(mins)} + {money.fmt(extra)} extra)"
+            else:
+                text = f"{name}: pay {money.fmt(extra)} extra {when(d)} (your payoff plan)"
+            lines.append(("🏦", text, d == today))
 
     for e in f.entries:
         if e.date not in (today, ahead) or e.item_id is None:

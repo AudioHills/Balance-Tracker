@@ -27,7 +27,8 @@ def test_compose_digest():
     dg = notify.compose(d, TODAY)
     texts = [t for _, t, _ in dg.lines]
     assert texts[0] == "Pay Visa $11.99 — Spotify"
-    assert any(t.startswith("Visa payment") and "tomorrow" in t for t in texts)
+    # the payoff plan pays the card off on today's payday (as soon as it's safe)
+    assert "Visa: pay $1,000.00 extra today (your payoff plan)" in texts
     assert any("Rent $1,500.00 comes out tomorrow" == t for t in texts)
     assert any("Pay $2,500.00 lands today" == t for t in texts)
     assert dg.subject.startswith("Pay Visa $11.99 — Spotify (+")

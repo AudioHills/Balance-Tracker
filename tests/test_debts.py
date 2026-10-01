@@ -113,3 +113,54 @@ def test_schedule_shows_months_when_this_months_due_date_passed():
     rows = plan.month_rows(t, 12)
     assert len(rows) == 12
     assert rows[0][1] == {} and rows[1][1]  # nothing left in October, November has the payment
+
+
+def test_spare_money_now_is_paid_right_away():
+    data = AppData()
+    data.checkpoints.append(Checkpoint(TODAY, 60000))  # $100 above the cushion today
+    data.items.append(RecurringItem("Pay", 200000, INCOME, "biweekly", date(2026, 10, 9)))
+    data.items.append(RecurringItem("Rent", 150000, BILL, "monthly", date(2026, 11, 1)))
+    data.settings.low_balance_threshold = 50000
+    data.debts = [card("Visa", 400000, 20.0, due_day=25, min_percent=2)]
+    first = make_plan(data, TODAY).next_extra(TODAY)
+    assert (first.date, first.amount) == (TODAY + timedelta(days=1), 10000)  # tomorrow (today is checked in)
+
+
+def test_extra_paid_on_payday_not_due_date():
+    data = AppData()
+    data.checkpoints.append(Checkpoint(TODAY, 50000))  # exactly at the cushion: nothing spare yet
+    data.items.append(RecurringItem("Pay", 200000, INCOME, "biweekly", date(2026, 10, 9)))
+    data.items.append(RecurringItem("Rent", 150000, BILL, "monthly", date(2026, 10, 1)))
+    data.settings.low_balance_threshold = 50000
+    data.debts = [card("Visa", 400000, 20.0, due_day=25, min_percent=2)]
+    plan = make_plan(data, TODAY)
+    first = plan.next_extra(TODAY)
+    assert first.date == date(2026, 10, 9)  # the paycheque day, not the 25th
+    paydays = {date(2026, 10, 9) + timedelta(days=14 * k) for k in range(40)} | {TODAY}
+    assert all(p.date in paydays for p in plan.payments if p.extra)
+
+
+def test_extras_never_push_balance_below_cushion_randomized():
+    import random
+    import sys
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
+    from test_web_engine import rand_data
+    from balance_tracker.debts import full_forecast
+    from balance_tracker.forecast import Forecast
+    rng = random.Random(4242)
+    checked = 0
+    for _ in range(120):
+        today = date(2026, 1, 1) + timedelta(days=rng.randint(0, 600))
+        data = rand_data(rng, today)
+        data.settings.debt_mode = "auto"
+        plan = make_plan(data, today)
+        extras = [p for p in plan.payments if p.extra]
+        if not extras:
+            continue
+        checked += 1
+        data.settings.debt_in_forecast = True
+        f = full_forecast(data, plan, today, plan.payments[-1].date + timedelta(days=400))
+        first = extras[0].date
+        lows = [bal for d, bal in f.daily.items() if d >= first]
+        assert min(lows) >= data.settings.low_balance_threshold, "an extra payment broke the cushion"
+    assert checked > 30  # plenty of scenarios really made extra payments
