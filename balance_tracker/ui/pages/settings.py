@@ -176,8 +176,11 @@ class SettingsPage(Page):
                                f"If something goes wrong, details are written to {log_file}")
         self._refresh_sync()
         self.auto.clear()
+        # Merged iPhone copies stay in the folder but aren't offered here: they're sync files, which
+        # leave out PC-only settings, so restoring one would switch off sync and email reminders.
         for b in self.ctx.store.backups():
-            self.auto.addItem(b.label, str(b.path))
+            if b.kind != "merged":
+                self.auto.addItem(b.label, str(b.path))
         if self.auto.count() == 0:
             self.auto.addItem("No backups yet", None)
         self._loading = False

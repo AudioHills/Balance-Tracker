@@ -35,7 +35,8 @@
 - Changing one setting re-saved every setting on the page, which could overwrite a value that had
   just synced from the phone.
 - Merged iPhone copies and safety backups were never cleaned up; the backup list is now sorted by
-  date with readable names.
+  date with readable names, and no longer offers phone sync copies, which would have switched off
+  sync and email reminders if restored.
 - "Email & phone reminders" showed as "Email _phone"; links were hard to read in dark mode; the debt
   chart's axis went below zero; "Send a test now" froze the window while sending.
 
@@ -44,4 +45,4 @@
   ported to the iPhone engine and cross-checked against it.
 - The UI is split into one module per page and dialog. Only the visible page recomputes after a
   change.
-- `pyproject.toml`, ruff linting in CI, logging, and tests grew from 60 to 96.
+- `pyproject.toml`, ruff linting in CI, logging, and tests grew from 60 to 97.

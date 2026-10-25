@@ -417,3 +417,13 @@ def test_spending_room_is_measured_before_plan_extras(app, tmp_path):
     dash = w.pages[0]
     assert dash.c_safe.value.text() != "$0.00" and "debt plan" in dash.c_safe.sub.text()
     assert dash.m_daily.value.text() != "$0.00 / day"
+
+
+def test_restore_list_leaves_out_phone_sync_copies(app, tmp_path):
+    w, _ = sample_window(tmp_path)
+    w.commit()  # writes today's automatic backup
+    (w.store.backup_dir / "merged-20260101-120000-BalanceTracker-sync 2.json").write_text("{}")
+    w.go(5)
+    labels = [w.pages[5].auto.itemText(i) for i in range(w.pages[5].auto.count())]
+    assert any(t.startswith("Automatic backup") for t in labels)
+    assert not any("iPhone" in t for t in labels)
