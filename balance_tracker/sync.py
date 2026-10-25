@@ -9,11 +9,15 @@ are implemented in web/engine.js.
 from __future__ import annotations
 
 import json
+import logging
 import os
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .models import AppData
+
+log = logging.getLogger(__name__)
 
 SYNC_FILE = "BalanceTracker-sync.json"
 SYNC_SUBFOLDER = "Balance Tracker"
@@ -145,9 +149,33 @@ def write_sync_file(folder: Path, data: AppData) -> None:
     os.replace(tmp, folder / SYNC_FILE)
 
 
-def sync_files(folder: Path) -> list:
+def sync_files(folder: Path) -> list[Path]:
     """The sync file plus any copies iCloud or the phone created ("…-sync 2.json")."""
     folder = Path(folder)
     if not folder.is_dir():
         return []
     return sorted(p for p in folder.glob("BalanceTracker-sync*.json") if p.is_file())
+
+
+@dataclass
+class PullResult:
+    data: AppData  # the local data with everything in the folder merged in
+    changed: bool  # whether that differs from the local data
+    copies: list[Path] = field(default_factory=list)  # merged extra copies, safe to tidy away
+
+
+def pull_folder(folder: Path, local: AppData) -> PullResult:
+    """Merge every sync file in `folder` (the PC's own plus any the phone saved) into `local`.
+    Files that can't be read yet (e.g. still downloading from iCloud) are skipped this time."""
+    merged = local
+    copies = []
+    for p in sync_files(folder):
+        try:
+            remote = AppData.from_dict(json.loads(p.read_text(encoding="utf-8")))
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            log.info("Skipping sync file %s for now: %s", p.name, e)
+            continue
+        merged = merge(merged, remote)
+        if p.name != SYNC_FILE:
+            copies.append(p)
+    return PullResult(merged, not same(merged, local), copies)

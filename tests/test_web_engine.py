@@ -9,7 +9,20 @@ from pathlib import Path
 import pytest
 
 from balance_tracker.debts import full_forecast, make_plan
-from balance_tracker.forecast import monthly_equivalent, next_occurrence, projection_end
+from balance_tracker.forecast import (
+    change_amount_from,
+    monthly_equivalent,
+    next_occurrence,
+    occurrences,
+    projection_end,
+)
+from balance_tracker.insights import (
+    bills_by_category,
+    monthly_totals,
+    payday_outlook,
+    unpaid_card_charges,
+    unplanned_summary,
+)
 from balance_tracker.models import (
     BILL,
     FREQUENCIES,
@@ -25,6 +38,11 @@ from balance_tracker.sync import merge, stamp
 ROOT = Path(__file__).resolve().parent.parent
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 
+# Names with characters that need escaping in calendar files or sort differently in naive code
+NAMES = ["Pay; main job", "Rent, unit 4", "Hydro \\ water", "Café ☕", "Netflix 🎬", "car loan", "Phone",
+         "Gym; monthly", "Insurance"]
+CATEGORIES = ["Food", "food ", "Housing", "Utilities"]
+
 
 def rand_data(rng: random.Random, today: date) -> AppData:
     d = AppData()
@@ -34,7 +52,7 @@ def rand_data(rng: random.Random, today: date) -> AppData:
     for k in range(rng.randint(0, 3)):
         day = start + timedelta(days=rng.randint(1, max(1, (today - start).days + 3)))
         d.add_checkpoint(Checkpoint(day, rng.randint(0, 400000), includes_today=rng.random() < 0.5,
-                                    note=rng.choice(["", "groceries"]), created_at=f"2026-01-0{k + 2}T00:00:00"))
+                                    note=rng.choice(["", "groceries; gas"]), created_at=f"2026-01-0{k + 2}T00:00:00"))
     for _ in range(rng.randint(1, 3)):
         d.debts.append(Debt(rng.choice(["Visa", "MC", "LOC", "Amex"]) + str(rng.randint(1, 9)),
                             rng.randint(0, 900000), round(rng.uniform(0, 29.99), 2),
@@ -45,10 +63,10 @@ def rand_data(rng: random.Random, today: date) -> AppData:
         kind = INCOME if n == 0 or rng.random() < 0.25 else BILL
         freq = rng.choice(list(FREQUENCIES))
         sd = today + timedelta(days=rng.randint(-400, 40))
-        it = RecurringItem(f"Item{n}", rng.randint(500, 300000), kind, freq, sd,
+        it = RecurringItem(NAMES[n], rng.randint(500, 300000), kind, freq, sd,
                            end_date=sd + timedelta(days=rng.randint(10, 600)) if rng.random() < 0.2 else None,
                            second_day=rng.choice([15, 28, 31]), weekend_rule=rng.choice(list(WEEKEND_RULES)),
-                           active=rng.random() < 0.9, category=rng.choice(["", "Food"]))
+                           active=rng.random() < 0.9, category=rng.choice(["", CATEGORIES[n % 4]]))
         if kind == BILL and rng.random() < 0.3:
             it.paid_with = rng.choice(d.debts).id
         if rng.random() < 0.3:
@@ -76,6 +94,21 @@ def python_result(data: AppData, today: date) -> dict:
         "monthly": [monthly_equivalent(i) for i in data.items],
         "next": [(lambda o: o.date.isoformat() if o else None)(next_occurrence(i, today)) for i in data.items],
     }
+    totals = monthly_totals(data.items, today)
+    res["totals"] = [totals.income, totals.bills, totals.net]
+    res["categories"] = [[c.category, c.monthly, c.share] for c in bills_by_category(data.items, today)]
+    res["cards"] = [[c.occurrence.date.isoformat(), c.key, c.amount] for c in unpaid_card_charges(data, today, 14)]
+    u = unplanned_summary(f, today)
+    res["unplanned"] = [u.this_month, u.average, u.months_tracked, u.total, u.checkins]
+    o = payday_outlook(f, today, data.settings.low_balance_threshold)
+    res["payday"] = None if o is None else [
+        o.payday.isoformat() if o.payday else None, o.pay, o.days, o.bills, o.bill_count,
+        [o.lowest[0].isoformat(), o.lowest[1]] if o.lowest else None, o.daily]
+    res["changes"] = []
+    for i, it in enumerate(data.items):
+        for when in change_dates(it, today):
+            head, tail = change_amount_from(it, when, 4321, continuation_id="cont")
+            res["changes"].append([i, when.isoformat(), head.to_dict(), tail.to_dict() if tail else None])
     if plan:
         res["payments"] = [[p.date.isoformat(), p.debt_id, p.amount, p.extra] for p in plan.payments]
         res["interest"] = plan.total_interest
@@ -87,6 +120,12 @@ def python_result(data: AppData, today: date) -> dict:
                 res[f"{strat}-{mode}"] = [p.total_interest, len(p.payments),
                                           p.debt_free.isoformat() if p.debt_free else None]
     return res
+
+
+def change_dates(item: RecurringItem, today: date) -> list[date]:
+    """A few dates to change an item's amount from: a scheduled one, an arbitrary one, its start."""
+    upcoming = [o.scheduled for o in occurrences(item, today + timedelta(days=30), today + timedelta(days=400))]
+    return ([upcoming[0]] if upcoming else []) + [today + timedelta(days=45), item.start_date]
 
 
 def run_node(tmp_path, scenarios):
@@ -104,12 +143,20 @@ def test_engine_matches_python(tmp_path):
     for _ in range(60):
         today = date(2026, 1, 1) + timedelta(days=rng.randint(0, 700))
         data = rand_data(rng, today)
-        scenarios.append({"data": data.to_dict(), "today": today.isoformat()})
-        expected.append(python_result(data, today))
+        exp = python_result(data, today)
+        changes = [[i, when] for i, when, *_ in exp["changes"]]
+        scenarios.append({"data": data.to_dict(), "today": today.isoformat(), "changes": changes})
+        expected.append(exp)
     got = run_node(tmp_path, scenarios)
     for k, (exp, js) in enumerate(zip(expected, got, strict=True)):
+        js["changes"] = [[i, when, *(_item_dict(x) for x in pair)] for i, when, *pair in js["changes"]]
         for key in exp:
             assert js[key] == exp[key], f"scenario {k}: {key} differs"
+    assert sum(len(e["categories"]) for e in expected) > 60 and sum(1 for e in expected if e["payday"]) > 30
+
+
+def _item_dict(d: dict | None) -> dict | None:
+    return None if d is None else RecurringItem.from_dict(d).to_dict()
 
 
 def _canonical(d: dict) -> str:

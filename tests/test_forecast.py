@@ -1,16 +1,18 @@
-from datetime import date
+import random
+from datetime import date, timedelta
 
 import pytest
 
 from balance_tracker.forecast import (
     Forecast,
+    change_amount_from,
     monthly_equivalent,
     next_occurrence,
     occurrences,
     scheduled_dates,
     shift_weekend,
 )
-from balance_tracker.models import BILL, INCOME, AppData, Checkpoint, RecurringItem
+from balance_tracker.models import BILL, FREQUENCIES, INCOME, WEEKEND_RULES, AppData, Checkpoint, RecurringItem
 from balance_tracker.storage import Store, export_backup, merge_data, read_backup
 
 
@@ -179,3 +181,62 @@ def test_merge():
     b.items.append(item(name="Gym"))
     merged = merge_data(a, b)
     assert len(merged.items) == 4 and len(merged.checkpoints) == 1
+
+
+# ---- changing an amount from a date on ------------------------------------
+def _occ(items, a, b):
+    return sorted((o.date, o.scheduled, o.amount) for it in items for o in occurrences(it, a, b))
+
+
+def test_change_amount_from_a_later_date_splits_the_item():
+    rent = item(name="Rent", amount=150000, frequency="monthly", start_date=date(2026, 1, 1))
+    head, tail = change_amount_from(rent, date(2026, 4, 1), 160000)
+    assert head.id == rent.id and head.end_date == date(2026, 3, 31) and head.amount == 150000
+    assert tail.id != rent.id and tail.start_date == date(2026, 4, 1) and tail.amount == 160000
+    assert rent.end_date is None and rent.amount == 150000  # the original is left untouched
+
+
+def test_change_amount_from_the_first_occurrence_just_changes_the_amount():
+    rent = item(frequency="monthly", start_date=date(2026, 1, 1), overrides={"2026-01-01": 5})
+    head, tail = change_amount_from(rent, date(2026, 1, 1), 1)
+    assert tail is None and head.amount == 1 and head.overrides == {}
+
+
+def test_change_amount_keeps_month_end_bills_on_the_last_day():
+    bill = item(frequency="monthly", start_date=date(2026, 1, 31), amount=1000)
+    head, tail = change_amount_from(bill, date(2026, 2, 28), 2000)
+    # Feb 28 can't start a "31st" schedule: it stays on the old item as a one-off amount
+    assert head.overrides == {"2026-02-28": 2000} and head.end_date == date(2026, 3, 30)
+    assert tail.start_date == date(2026, 3, 31)
+    assert [o.date for o in occurrences(tail, date(2026, 3, 1), date(2026, 7, 31))] == [
+        date(2026, 3, 31), date(2026, 4, 30), date(2026, 5, 31), date(2026, 6, 30), date(2026, 7, 31)]
+
+
+def test_change_amount_from_matches_the_original_schedule_randomized():
+    rng = random.Random(5)
+    for _ in range(400):
+        freq = rng.choice(list(FREQUENCIES))
+        start = date(2024, 1, 1) + timedelta(days=rng.randint(0, 800))
+        it = item(frequency=freq, start_date=start, amount=rng.randint(100, 9999),
+                  kind=rng.choice([INCOME, BILL]), second_day=rng.choice([1, 14, 15, 28, 30, 31]),
+                  weekend_rule=rng.choice(list(WEEKEND_RULES)),
+                  end_date=start + timedelta(days=rng.randint(30, 2000)) if rng.random() < 0.3 else None)
+        horizon = start + timedelta(days=3000)
+        scheduled = [o.scheduled for o in occurrences(it, start, horizon)]
+        for d in rng.sample(scheduled, min(3, len(scheduled))):
+            it.overrides[d.isoformat()] = rng.choice([None, rng.randint(1, 99)])
+        when = rng.choice(scheduled) if scheduled and rng.random() < 0.8 else start + timedelta(
+            days=rng.randint(-20, 900))
+        new_amount = rng.randint(100, 9999)
+        head, tail = change_amount_from(it, when, new_amount)
+
+        sign = 1 if it.kind == INCOME else -1
+        expected = []
+        for o in occurrences(it, start - timedelta(days=5), horizon):
+            changed = o.scheduled >= when and (o.scheduled == when or o.scheduled.isoformat() not in it.overrides)
+            expected.append((o.date, o.scheduled, sign * new_amount if changed else o.amount))
+        if when in scheduled and when.isoformat() in it.overrides and it.overrides[when.isoformat()] is None:
+            post = shift_weekend(when, it.weekend_rule)  # a skipped date picked explicitly gets the new amount
+            expected.append((post, when, sign * new_amount))
+        got = _occ([head] + ([tail] if tail else []), start - timedelta(days=5), horizon)
+        assert got == sorted(expected), (freq, start, when, it.second_day)

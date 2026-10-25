@@ -9,6 +9,11 @@ def set_symbol(symbol: str) -> None:
     _symbol = symbol or "$"
 
 
+def symbol() -> str:
+    """The currency symbol amounts are currently shown with."""
+    return _symbol
+
+
 def fmt(cents: int | None, signed: bool = False) -> str:
     if cents is None:
         return "—"
@@ -37,4 +42,5 @@ def fmt_short(cents: int) -> str:
 
 
 def to_cents(value: float) -> int:
+    """Dollars (as typed into a form) to integer cents."""
     return int(round(value * 100))

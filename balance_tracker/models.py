@@ -4,8 +4,10 @@ All money values are stored as integer cents to avoid floating point drift.
 """
 from __future__ import annotations
 
+import contextlib
+import re
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import date, datetime
 
 SCHEMA_VERSION = 1
@@ -47,9 +49,27 @@ DEBT_STRATEGIES = {
     "snowball": "Smallest balance first",
 }
 
+DEBT_MODES = ("auto", "fixed")  # auto = as much as the cushion allows; fixed = a set extra per month
+THEMES = ("system", "light", "dark")
+
+_HHMM = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+
 
 def new_id() -> str:
     return uuid.uuid4().hex[:12]
+
+
+def parse_hhmm(text: str) -> tuple[int, int]:
+    """("08:30") -> (8, 30). Raises ValueError for anything that isn't a 24-hour HH:MM time."""
+    m = _HHMM.match(text or "")
+    if not m:
+        raise ValueError(f"Not a time of day: {text!r}")
+    return int(m.group(1)), int(m.group(2))
+
+
+def card_paid_key(item_id: str, day: date) -> str:
+    """Key under which a credit-card charge is remembered as paid off (see AppData.card_paid)."""
+    return f"{item_id}|{day.isoformat()}"
 
 
 def _d(value) -> date | None:
@@ -113,7 +133,7 @@ class RecurringItem:
             frequency=freq,
             start_date=_d(d.get("start_date")) or date.today(),
             end_date=_d(d.get("end_date")),
-            second_day=int(d.get("second_day", LAST_DAY)),
+            second_day=min(LAST_DAY, max(1, int(d.get("second_day") or LAST_DAY))),
             weekend_rule=d.get("weekend_rule", "none") if d.get("weekend_rule") in WEEKEND_RULES else "none",
             category=str(d.get("category", "")),
             notes=str(d.get("notes", "")),
@@ -247,27 +267,67 @@ class Settings:
 
     @classmethod
     def from_dict(cls, d: dict) -> Settings:
+        """Read saved settings. A missing or malformed value falls back to its default rather
+        than making the whole data file unreadable."""
         s = cls()
-        for k in asdict(s):
-            if k in d:
-                setattr(s, k, type(getattr(s, k))(d[k]))
-        if s.theme not in ("system", "light", "dark"):
-            s.theme = "system"
-        s.forecast_months = max(1, min(36, s.forecast_months))
-        if s.debt_strategy not in DEBT_STRATEGIES:
-            s.debt_strategy = "avalanche"
-        if s.debt_mode not in ("auto", "fixed"):
-            s.debt_mode = "auto"
+        for f in fields(cls):
+            if f.name not in d:
+                continue
+            with contextlib.suppress(TypeError, ValueError):  # keep the default
+                setattr(s, f.name, _coerce(d[f.name], type(getattr(s, f.name))))
+        s._normalise()
         return s
+
+    def _normalise(self) -> None:
+        defaults = Settings()
+        if self.theme not in THEMES:
+            self.theme = defaults.theme
+        if self.debt_strategy not in DEBT_STRATEGIES:
+            self.debt_strategy = defaults.debt_strategy
+        if self.debt_mode not in DEBT_MODES:
+            self.debt_mode = defaults.debt_mode
+        for name in ("reminder_time", "notify_time"):
+            try:
+                parse_hhmm(getattr(self, name))
+            except ValueError:
+                setattr(self, name, getattr(defaults, name))
+        if not 1 <= self.smtp_port <= 65535:
+            self.smtp_port = defaults.smtp_port
+        self.forecast_months = max(1, min(36, self.forecast_months))
+        self.notify_days_before = max(0, min(7, self.notify_days_before))
+        self.low_balance_threshold = max(0, self.low_balance_threshold)
+        self.debt_fixed_extra = max(0, self.debt_fixed_extra)
+        self.currency_symbol = self.currency_symbol.strip()[:4] or defaults.currency_symbol
+        self.account_name = self.account_name.strip() or defaults.account_name
+
+
+def _coerce(value, kind: type):
+    """Convert a JSON value to the type of a settings field."""
+    if value is None:
+        raise TypeError("missing value")
+    if kind is bool:
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text in ("true", "yes", "1"):
+                return True
+            if text in ("false", "no", "0", ""):
+                return False
+            raise ValueError(f"Not a yes/no value: {value!r}")
+        return bool(value)
+    if kind is int:
+        return int(round(float(value)))
+    if kind is float:
+        return float(value)
+    return str(value)
 
 
 @dataclass
 class AppData:
-    items: list = field(default_factory=list)  # list[RecurringItem]
-    checkpoints: list = field(default_factory=list)  # list[Checkpoint]
-    debts: list = field(default_factory=list)  # list[Debt]
-    # "item_id|YYYY-MM-DD" keys of card charges the user has marked as paid off
-    card_paid: list = field(default_factory=list)
+    items: list[RecurringItem] = field(default_factory=list)
+    checkpoints: list[Checkpoint] = field(default_factory=list)
+    debts: list[Debt] = field(default_factory=list)
+    # card_paid_key() values of card charges the user has marked as paid off
+    card_paid: list[str] = field(default_factory=list)
     # Sync bookkeeping: id -> UTC time it was deleted; when shared settings last changed
     deleted: dict = field(default_factory=dict)
     settings_updated: str = ""
@@ -278,7 +338,7 @@ class AppData:
     def has_start(self) -> bool:
         return bool(self.checkpoints)
 
-    def sorted_checkpoints(self) -> list:
+    def sorted_checkpoints(self) -> list[Checkpoint]:
         return sorted(self.checkpoints, key=lambda c: (c.date, c.created_at))
 
     @property
@@ -297,12 +357,19 @@ class AppData:
     def debt(self, debt_id: str) -> Debt | None:
         return next((d for d in self.debts if d.id == debt_id), None)
 
+    def checkpoint(self, cp_id: str) -> Checkpoint | None:
+        return next((c for c in self.checkpoints if c.id == cp_id), None)
+
+    def card_for(self, item: RecurringItem) -> Debt | None:
+        """The credit card a bill is charged to, if any."""
+        return self.debt(item.paid_with) if item.paid_with else None
+
     def add_checkpoint(self, cp: Checkpoint) -> None:
         """Add a checkpoint, replacing any other checkpoint on the same day."""
         self.checkpoints = [c for c in self.checkpoints if c.date != cp.date]
         self.checkpoints.append(cp)
 
-    def categories(self) -> list:
+    def categories(self) -> list[str]:
         return sorted({i.category for i in self.items if i.category}, key=str.lower)
 
     # ---- serialisation -----------------------------------------------

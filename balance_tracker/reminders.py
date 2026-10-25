@@ -12,7 +12,7 @@ from datetime import date, datetime, time, timedelta, timezone
 
 from . import money
 from .forecast import add_months, occurrences
-from .models import INCOME, AppData
+from .models import INCOME, AppData, parse_hhmm
 
 
 @dataclass
@@ -26,11 +26,11 @@ class Reminder:
 
 def collect(data: AppData, plan, today: date, months: int = 6, card_charges: bool = True,
             debt_payments: bool = True, bills: bool = False, paydays: bool = False,
-            days_before: int = 1) -> list:
+            days_before: int = 1) -> list[Reminder]:
     end = add_months(today, months)
     out = []
     for item in data.items:
-        card = data.debt(item.paid_with) if item.paid_with else None
+        card = data.card_for(item)
         want = (card is not None and card_charges) or (card is None and item.kind != INCOME and bills) \
             or (item.kind == INCOME and paydays)
         if not want:
@@ -87,7 +87,7 @@ def _fold(line: str) -> str:
 
 
 def to_ics(reminders: list, at: str = "09:00", calendar_name: str = "Balance Tracker") -> str:
-    hh, mm = (int(x) for x in at.split(":"))
+    hh, mm = parse_hhmm(at)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Balance Tracker//Reminders//EN",
              "CALSCALE:GREGORIAN", "METHOD:PUBLISH", f"X-WR-CALNAME:{_esc(calendar_name)}"]

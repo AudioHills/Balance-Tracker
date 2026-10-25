@@ -35,7 +35,18 @@ export function pyRound(x) {
   return f % 2 === 0 ? f : f + 1;
 }
 const lower = (s) => s.toLowerCase();
-const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+// Strings compare by code point, like Python (plain < compares UTF-16 units, which differs for emoji)
+function cmpStr(a, b) {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const x = a.codePointAt(i), y = b.codePointAt(i);
+    if (x !== y) return x - y;
+    if (x > 0xffff) i++;
+  }
+  return a.length - b.length;
+}
+const cmp = (a, b) => (typeof a === "string" && typeof b === "string" ? Math.sign(cmpStr(a, b)) : a < b ? -1 : a > b ? 1 : 0);
+const clone = (x) => JSON.parse(JSON.stringify(x));
 const cmpTuple = (a, b) => { for (let i = 0; i < a.length; i++) { const c = cmp(a[i], b[i]); if (c) return c; } return 0; };
 
 // ---------------------------------------------------------------- model
@@ -187,6 +198,36 @@ export function nextOccurrence(item, today) {
   return null;
 }
 export const monthlyEquivalent = (item) => pyRound((signedAmount(item) * PER_YEAR[item.frequency]) / 12);
+
+// Would a copy starting on scheduled date d repeat the same dates? (Not a "31st" bill on Feb 28.)
+const realigns = (item, d) => !!STEP_DAYS[item.frequency] || ymd(d).d === ymd(toDay(item.start_date)).d;
+
+// New amount for occurrences scheduled on/after `when`. Mirrors forecast.change_amount_from().
+export function changeAmountFrom(item, when, amount, continuationId = null) {
+  const head = clone(item);
+  const key = toISO(when);
+  if (when <= toDay(item.start_date)) {
+    head.amount = amount;
+    delete head.overrides[key];
+    return [head, null];
+  }
+  const between = [];
+  let anchor = null;
+  for (const d of scheduledDates(item, when + 366 * 9, when)) {
+    if (d < when) continue;
+    if (realigns(item, d)) { anchor = d; break; }
+    between.push(d);
+  }
+  for (const d of between) { const k = toISO(d); if (k === key || !(k in head.overrides)) head.overrides[k] = amount; }
+  if (anchor === null) return [head, null];
+  const cut = toISO(anchor);
+  head.end_date = toISO(anchor - 1);
+  head.overrides = Object.fromEntries(Object.entries(head.overrides).filter(([k]) => k < cut));
+  const tail = clone(item);
+  Object.assign(tail, { id: continuationId || newId(), start_date: cut, amount, updated: "" });
+  tail.overrides = Object.fromEntries(Object.entries(item.overrides).filter(([k]) => k >= cut && k !== key));
+  return [head, tail];
+}
 
 // ---------------------------------------------------------------- forecast
 const occKey = (o) => [o.amount < 0 ? 1 : 0, lower(o.item.name)];
@@ -494,6 +535,88 @@ export function fullForecast(data, plan, today, end, extra = [], debtExtras = tr
   return new Forecast(source || data, end, today, extra, suppress);
 }
 
+// ---------------------------------------------------------------- insights
+// Port of balance_tracker/insights.py — cross-checked in tests/test_web_engine.py.
+export const UNCATEGORIZED = "Uncategorized";
+export const PAYDAY_WINDOW_DAYS = 30;
+export const countsTowardMonthly = (item, today) =>
+  item.active && item.frequency !== "once" && (!item.end_date || toDay(item.end_date) >= today);
+const sum = (xs) => xs.reduce((a, b) => a + b, 0);
+
+export function monthlyTotals(items, today) {
+  const live = items.filter((i) => countsTowardMonthly(i, today));
+  const income = sum(live.filter((i) => i.kind === "income").map(monthlyEquivalent));
+  const bills = -sum(live.filter((i) => i.kind === "bill").map(monthlyEquivalent));
+  return { income, bills, net: income - bills };
+}
+
+export function billsByCategory(items, today) {
+  const totals = new Map(), names = new Map();
+  for (const i of items) {
+    if (i.kind !== "bill" || !countsTowardMonthly(i, today)) continue;
+    const name = i.category.trim() || UNCATEGORIZED;
+    const key = lower(name);
+    if (!names.has(key)) names.set(key, name);
+    totals.set(key, (totals.get(key) || 0) - monthlyEquivalent(i));
+  }
+  const rows = [...totals].filter(([, v]) => v > 0).map(([k, v]) => [names.get(k), v]);
+  const grand = sum(rows.map(([, v]) => v));
+  return rows.sort((a, b) => (b[1] - a[1]) || cmp(lower(a[0]), lower(b[0])))
+    .map(([category, monthly]) => ({ category, monthly, share: monthly / grand }));
+}
+
+export function unpaidCardCharges(data, today, days) {
+  const paid = new Set(data.card_paid);
+  const out = [];
+  for (const item of data.items) {
+    const card = item.paid_with ? findDebt(data, item.paid_with) : null;
+    if (!card) continue;
+    for (const o of occurrences(item, today - days, today)) {
+      const key = `${item.id}|${toISO(o.date)}`;
+      if (!paid.has(key)) out.push({ occurrence: o, card, key, amount: Math.abs(o.amount) });
+    }
+  }
+  return out.sort((a, b) => a.occurrence.date - b.occurrence.date);
+}
+
+export const previousMonths = (today, n) =>
+  Array.from({ length: n }, (_, k) => ymd(addMonths(firstOfMonth(today), -(k + 1), 1)));
+
+export function unplannedSummary(fc, today, months = 6) {
+  const by = fc.unplannedByMonth();
+  const key = (m) => `${m.y}-${m.m}`;
+  const tracked = previousMonths(today, months).filter((m) => by.has(key(m))).map((m) => by.get(key(m)));
+  return {
+    thisMonth: by.get(key(ymd(today))) || 0,
+    average: tracked.length ? pyRound(sum(tracked) / tracked.length) : null,
+    monthsTracked: tracked.length,
+    total: sum([...by.values()]),
+    checkins: fc.checkins().length,
+  };
+}
+
+// Until the next payday, with the most you can spend each day and keep your cushion.
+export function paydayOutlook(fc, today, cushion, windowDays = PAYDAY_WINDOW_DAYS) {
+  if (fc.balanceOn(today) === null) return null;
+  const windowEnd = today + windowDays;
+  const nxt = fc.nextIncome(today);
+  const payday = nxt && nxt.date <= windowEnd ? nxt.date : null;
+  const lastSpend = payday !== null ? payday - 1 : windowEnd;
+  const days = lastSpend - today + 1;
+  let worst = null;
+  for (let k = 0; k <= windowDays; k++) {
+    const bal = fc.balanceOn(today + k);
+    if (bal === null) continue;
+    const perDay = Math.floor((bal - cushion) / Math.min(k + 1, days));
+    worst = worst === null ? perDay : Math.min(worst, perDay);
+  }
+  const daily = Math.max(0, worst ?? 0);
+  const goingOut = fc.entriesBetween(today, lastSpend).filter((e) => e.kind === "bill");
+  const pay = payday === null ? 0 : sum(fc.entries.filter((e) => e.kind === "income" && e.date === payday).map((e) => e.amount));
+  return { payday, pay, days, bills: -sum(goingOut.map((e) => e.amount)), billCount: goingOut.length,
+    lowest: fc.lowest(today, lastSpend), daily: daily - (daily % 100) };
+}
+
 // ---------------------------------------------------------------- sync
 function canon(v) {
   if (Array.isArray(v)) return `[${v.map(canon).join(",")}]`;
@@ -501,7 +624,6 @@ function canon(v) {
   return JSON.stringify(v);
 }
 const body = (r) => { const { updated, ...rest } = r; return canon(rest); };
-const clone = (x) => JSON.parse(JSON.stringify(x));
 
 // Mark what changed in `cur` since `prev` (the last saved copy). Mirrors sync.stamp().
 export function stamp(prev, cur, now = nowUTC()) {
@@ -566,9 +688,6 @@ export function fmtMoney(cents, symbol = "$", signed = false) {
   const body = symbol + (Math.abs(cents) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   return cents < 0 ? "−" + body : signed && cents > 0 ? "+" + body : body;
 }
-const cpCmp = (a, b) => { const A = Array.from(a), B = Array.from(b);
-  for (let i = 0; i < Math.min(A.length, B.length); i++) { const d = A[i].codePointAt(0) - B[i].codePointAt(0); if (d) return d; }
-  return A.length - B.length; };
 
 export function collectReminders(data, plan, today, { months = 6, cardCharges = true, debtPayments = true, bills = false,
   paydays = false, daysBefore = 1 } = {}) {
@@ -608,10 +727,10 @@ export function collectReminders(data, plan, today, { months = 6, cardCharges = 
         detail: `Payoff plan: pay ${total} to ${name} (${parts.join(" + ")}).`, daysBefore });
     }
   }
-  return out.sort((a, b) => (a.day - b.day) || cpCmp(a.title, b.title));
+  return out.sort((a, b) => (a.day - b.day) || cmpStr(a.title, b.title));
 }
 
-const icsEsc = (t) => t.replace(/\\/g, "\\\\").replace(/;/g, "\;").replace(/,/g, "\\,").replace(/\n/g, "\\n");
+const icsEsc = (t) => t.replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\n/g, "\\n");
 function icsFold(line) {
   const enc = new TextEncoder();
   const out = [];

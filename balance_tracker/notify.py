@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import smtplib
 import ssl
@@ -26,11 +27,17 @@ from pathlib import Path
 
 from . import money
 from .debts import full_forecast, make_plan
-from .forecast import occurrences, projection_end
-from .models import INCOME, AppData
+from .forecast import projection_end
+from .formatting import month_day, relative_day
+from .insights import unpaid_card_charges
+from .models import INCOME, AppData, parse_hhmm
+
+log = logging.getLogger(__name__)
 
 TASK_NAME = "Balance Tracker Reminders"
 SECRETS_FILE = "secrets.json"
+ACTIVITY_LOG = "reminders.log"  # shown in the app as "Last activity"
+CARD_NAG_DAYS = 7  # keep reminding about an unpaid card charge for a week
 
 EMAIL_PRESETS = {  # label -> (host, port, ssl)
     "Gmail": ("smtp.gmail.com", 587, False),
@@ -131,23 +138,14 @@ def compose(data: AppData, today: date) -> Digest | None:
     lines = []
 
     def when(d: date) -> str:
-        if d == today:
-            return "today"
-        if d == today + timedelta(days=1):
-            return "tomorrow"
-        return d.strftime("on %a %b %d")
+        return relative_day(d, today, long=False)
 
     # Card charges: today's, plus any from the last week not marked paid
     if s.notify_card:
-        for item in data.items:
-            card = data.debt(item.paid_with) if item.paid_with else None
-            if card is None:
-                continue
-            for o in occurrences(item, today - timedelta(days=7), today):
-                if f"{item.id}|{o.date.isoformat()}" in data.card_paid:
-                    continue
-                late = "" if o.date == today else f" (charged {o.date.strftime('%b %d')} — still unpaid)"
-                lines.append(("💳", f"Pay {card.name} {money.fmt(abs(o.amount))} — {item.name}{late}", True))
+        for c in unpaid_card_charges(data, today, CARD_NAG_DAYS):
+            charged = c.occurrence.date
+            late = "" if charged == today else f" (charged {month_day(charged)} — still unpaid)"
+            lines.append(("💳", f"Pay {c.card.name} {money.fmt(c.amount)} — {c.occurrence.item.name}{late}", True))
 
     if s.notify_debts and plan is not None:
         names = {d.id: d.name for d in data.debts}
@@ -156,7 +154,7 @@ def compose(data: AppData, today: date) -> Digest | None:
             if p.date in (today, ahead):
                 key = (p.debt_id, p.date)
                 mins, extra = totals.get(key, (0, 0))
-                totals[key] = (mins + (0 if p.extra else p.amount), extra + (p.amount if p.extra else 0))
+                totals[key] = (mins, extra + p.amount) if p.extra else (mins + p.amount, extra)
         for (debt_id, d), (mins, extra) in sorted(totals.items(), key=lambda kv: kv[0][1]):
             name = names.get(debt_id, "Debt")
             if mins:
@@ -247,8 +245,11 @@ def due_now(data: AppData, now: datetime | None = None) -> bool:
     if not (s.email_enabled or s.ntfy_enabled):
         return False
     now = now or datetime.now()
-    hh, mm = (int(x) for x in s.notify_time.split(":"))
-    return s.notify_last_sent != now.date().isoformat() and (now.hour, now.minute) >= (hh, mm)
+    try:
+        at = parse_hhmm(s.notify_time)
+    except ValueError:
+        at = (8, 0)
+    return s.notify_last_sent != now.date().isoformat() and (now.hour, now.minute) >= at
 
 
 def run_daily(store, now: datetime | None = None) -> str:
@@ -262,26 +263,29 @@ def run_daily(store, now: datetime | None = None) -> str:
     if not errors:
         data.settings.notify_last_sent = today.isoformat()
         store.save(data)
-    _log(store.folder, "nothing to send" if not digest else ("; ".join(errors) or "sent"))
+    log_activity(store.folder, "nothing to send" if not digest else ("; ".join(errors) or "sent"))
     return "; ".join(errors) if errors else ("sent" if digest else "nothing to send")
 
 
 def last_log(folder: Path) -> str:
+    """The most recent line of the reminder activity log."""
     try:
-        lines = (Path(folder) / "reminders.log").read_text(encoding="utf-8").splitlines()
+        lines = (Path(folder) / ACTIVITY_LOG).read_text(encoding="utf-8").splitlines()
         return lines[-1] if lines else ""
     except OSError:
         return ""
 
 
-def _log(folder: Path, msg: str) -> None:
+def log_activity(folder: Path, msg: str) -> None:
+    """Record what the reminder sender did, for "Last activity" in the app (last 200 lines kept)."""
+    log.info("Reminders: %s", msg)
     try:
-        p = Path(folder) / "reminders.log"
+        p = Path(folder) / ACTIVITY_LOG
         lines = p.read_text(encoding="utf-8").splitlines()[-200:] if p.exists() else []
         lines.append(f"{datetime.now():%Y-%m-%d %H:%M} {msg}")
         p.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    except OSError:
-        pass
+    except OSError as e:
+        log.warning("Couldn't write %s: %s", ACTIVITY_LOG, e)
 
 
 # --------------------------------------------------------------------------

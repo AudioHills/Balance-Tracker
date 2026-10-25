@@ -2,12 +2,17 @@
 from __future__ import annotations
 
 import calendar
+import copy
 from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-from .models import INCOME, LAST_DAY, AppData, Checkpoint, RecurringItem
+from .models import BILL, INCOME, LAST_DAY, AppData, Checkpoint, RecurringItem, new_id
+
+# Kinds of ledger entry (Entry.kind); INCOME and BILL come from scheduled items
+START = "start"
+CHECKIN = "checkin"
 
 STEP_DAYS = {"weekly": 7, "biweekly": 14, "fourweekly": 28}
 STEP_MONTHS = {"monthly": 1, "bimonthly": 2, "quarterly": 3, "semiannual": 6, "yearly": 12}
@@ -95,7 +100,7 @@ class Occurrence:
     overridden: bool = False
 
 
-def occurrences(item: RecurringItem, start: date, end: date) -> list:
+def occurrences(item: RecurringItem, start: date, end: date) -> list[Occurrence]:
     """All occurrences of `item` that post between start and end (inclusive)."""
     out = []
     if not item.active:
@@ -129,13 +134,72 @@ def monthly_equivalent(item: RecurringItem) -> int:
     return round(item.signed_amount * PER_YEAR[item.frequency] / 12)
 
 
+def _realigns(item: RecurringItem, d: date) -> bool:
+    """Would a copy of `item` starting on its scheduled date `d` repeat exactly the same dates?
+    Not when `d` was pulled in from a later day of the month (a "31st" bill on Feb 28)."""
+    if item.frequency in STEP_DAYS:
+        return True
+    return d.day == item.start_date.day
+
+
+def change_amount_from(item: RecurringItem, when: date, amount: int,
+                       continuation_id: str | None = None) -> tuple[RecurringItem, RecurringItem | None]:
+    """Give every occurrence of `item` scheduled on or after `when` a new amount (rent going up,
+    a new phone plan). The schedule itself never moves.
+
+    Returns ``(item, continuation)`` as new objects. If the change starts at the first occurrence,
+    the item just gets the new amount and there is no continuation. Otherwise the item stops before
+    the change and the continuation (a copy with a new id) carries on with the new amount. It starts
+    on the first date at which a fresh schedule lines up with the old one; any occurrences before
+    that (e.g. a "31st" bill falling on Feb 28) stay on the item as one-off amounts.
+
+    One-off changes and skips after `when` are kept; one on `when` itself is replaced.
+    """
+    head = copy.deepcopy(item)
+    key = when.isoformat()
+    if when <= item.start_date:
+        head.amount = amount
+        head.overrides.pop(key, None)
+        return head, None
+
+    between: list[date] = []  # scheduled on/after `when`, before the schedule realigns
+    anchor = None
+    # 9 years always reaches a realigned date (a Feb 29 yearly bill skips at most 8 years)
+    for d in scheduled_dates(item, when + timedelta(days=366 * 9), since=when):
+        if d < when:
+            continue
+        if _realigns(item, d):
+            anchor = d
+            break
+        between.append(d)
+    for d in between:
+        k = d.isoformat()
+        if k == key or k not in head.overrides:
+            head.overrides[k] = amount
+    if anchor is None:  # the item ends before it realigns: the one-off amounts cover it
+        return head, None
+
+    cut = anchor.isoformat()
+    head.end_date = anchor - timedelta(days=1)
+    head.overrides = {k: v for k, v in head.overrides.items() if k < cut}
+    tail = copy.deepcopy(item)
+    tail.id = continuation_id or new_id()
+    tail.start_date = anchor
+    tail.amount = amount
+    tail.updated = ""
+    tail.overrides = {k: v for k, v in item.overrides.items() if k >= cut and k != key}
+    return head, tail
+
+
 # --------------------------------------------------------------------------
 # Projection
 # --------------------------------------------------------------------------
 @dataclass
 class Entry:
+    """One line of the day-by-day ledger."""
+
     date: date
-    kind: str  # start | income | bill | checkin
+    kind: str  # START | INCOME | BILL | CHECKIN
     description: str
     amount: int
     balance: int
@@ -158,8 +222,8 @@ class Forecast:
         self.today = today or date.today()
         self.extra = extra or []
         self.suppress = suppress or {}
-        self.entries: list = []
-        self.daily: dict = {}  # date -> end-of-day balance
+        self.entries: list[Entry] = []
+        self.daily: dict[date, int] = {}  # date -> end-of-day balance
         self.start: date | None = None
         self.end = end
         self._build()
@@ -193,7 +257,7 @@ class Forecast:
         while d <= self.end:
             todays = sorted(occ_by_date.get(d, []), key=lambda o: (o.amount < 0, o.item.name.lower()))
             if d == first.date:
-                self.entries.append(Entry(d, "start", "Starting balance", 0, running,
+                self.entries.append(Entry(d, START, "Starting balance", 0, running,
                                           checkpoint_id=first.id))
                 if not first.includes_today:
                     todays = sorted(todays + start_extras, key=lambda o: (o.amount < 0, o.item.name.lower()))
@@ -221,7 +285,7 @@ class Forecast:
             if card is not None:
                 desc = f"Pay {card.name}: {o.item.name}"
             self.entries.append(Entry(
-                o.date, "income" if o.amount >= 0 else "bill", desc, o.amount, running,
+                o.date, INCOME if o.amount >= 0 else BILL, desc, o.amount, running,
                 category=o.item.category, item_id=o.item.id or None, scheduled=o.scheduled,
                 overridden=o.overridden))
         return running
@@ -236,7 +300,7 @@ class Forecast:
             desc = "Check-in: right on plan"
         if cp.note:
             desc += f" — {cp.note}"
-        self.entries.append(Entry(cp.date, "checkin", desc, diff, cp.balance,
+        self.entries.append(Entry(cp.date, CHECKIN, desc, diff, cp.balance,
                                   checkpoint_id=cp.id, projected=running))
         return cp.balance
 
@@ -257,7 +321,7 @@ class Forecast:
             return self.data.start.balance
         return self.daily.get(d - timedelta(days=1))
 
-    def entries_between(self, a: date, b: date) -> list:
+    def entries_between(self, a: date, b: date) -> list[Entry]:
         return [e for e in self.entries if a <= e.date <= b]
 
     def lowest(self, a: date, b: date):
@@ -279,7 +343,7 @@ class Forecast:
         return None
 
     def next_income(self, after: date) -> Entry | None:
-        return next((e for e in self.entries if e.kind == "income" and e.date > after), None)
+        return next((e for e in self.entries if e.kind == INCOME and e.date > after), None)
 
     def safe_to_spend(self, today: date, days: int = 30, cushion: int = 0) -> int | None:
         """How much could be spent today without any day in the next `days`
@@ -294,12 +358,12 @@ class Forecast:
         """(year, month) -> net unplanned amount from check-ins (negative = overspent)."""
         out = defaultdict(int)
         for e in self.entries:
-            if e.kind == "checkin":
+            if e.kind == CHECKIN:
                 out[(e.date.year, e.date.month)] += e.amount
         return dict(out)
 
-    def checkins(self) -> list:
-        return [e for e in self.entries if e.kind == "checkin"]
+    def checkins(self) -> list[Entry]:
+        return [e for e in self.entries if e.kind == CHECKIN]
 
 
 def horizon_end(data: AppData, today: date) -> date:
