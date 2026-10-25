@@ -4,6 +4,17 @@ A modern Windows desktop app that forecasts your chequing account **day by day**
 Enter your balance, add your paycheques and bills once (weekly, every 2 weeks, twice a month,
 monthly, yearly…), and Balance Tracker works out every future date and the running balance for you.
 
+## What's new in 2.0
+
+- **Until payday:** how much you can spend each day until your next paycheque and still keep your
+  cushion, plus what goes out before then.
+- **Where your bills go:** your monthly bills broken down by category.
+- **Change amount from a date on:** rent going up next month? Right-click it and set the new amount;
+  earlier dates stay as they were.
+- **Undo history** (Ctrl+Z, up to 25 steps), a **filter** for Day by day (Ctrl+F), a shortcuts list (F1),
+  and **Check for updates** in Settings.
+- Many fixes, including amount boxes that could appear blank. See [CHANGELOG.md](CHANGELOG.md).
+
 ## Features
 
 **What you asked for**
@@ -62,7 +73,8 @@ monthly, yearly…), and Balance Tracker works out every future date and the run
   is looking over your shoulder. Each device remembers its own choice.
 - **Calendar date pickers:** click any date box to pick a date from a calendar.
 - **Keyboard shortcuts:** `Ctrl+1…6` switch pages, `Ctrl+K` check in, `Ctrl+I` add income,
-  `Ctrl+B` add bill, `Ctrl+D` add debt, `Ctrl+A` "Can I afford it?".
+  `Ctrl+B` add bill, `Ctrl+D` add debt, `Ctrl+A` "Can I afford it?", `Ctrl+F` filter,
+  `Ctrl+Z` undo, `Ctrl+T` light/dark. Press `F1` for the full list.
 
 ## iPhone app
 
@@ -108,6 +120,7 @@ and then `python main.py`.
 ## Where your data lives
 
 `%APPDATA%\BalanceTracker\data.json`, with daily snapshots in the `backups` folder next to it.
+If something goes wrong, details are written to `balance-tracker.log` in the same folder.
 The Settings page shows the exact path and has an *Open data folder* button. Set the
 `BALANCE_TRACKER_HOME` environment variable to keep the data somewhere else (e.g. a OneDrive folder).
 
@@ -131,20 +144,28 @@ Otherwise untick it, and they'll be applied after your check-in.
 
 ```
 pip install -r requirements-dev.txt
-python -m pytest            # engine tests and an offscreen UI smoke test
+ruff check .                # lint (CI runs this too)
+python -m pytest            # engine, sync and UI tests (the UI runs offscreen)
 python main.py
 ```
+
+`tests/test_web_engine.py` runs `web/engine.js` under Node on hundreds of random scenarios and
+checks every number against the Python engine, so a change to one engine needs the same change in
+the other. It is skipped if Node isn't installed.
 
 Code layout:
 
 | Path | What |
 | --- | --- |
 | `balance_tracker/models.py` | Data classes (amounts in integer cents) and JSON (de)serialisation |
-| `balance_tracker/forecast.py` | Schedule generation and the day-by-day projection engine |
+| `balance_tracker/forecast.py` | Schedule generation, the day-by-day projection, changing an amount from a date |
+| `balance_tracker/insights.py` | Monthly totals, bills by category, card charges, unplanned spending, payday outlook |
 | `balance_tracker/debts.py` | Debt payoff simulation and the cushion-aware payment planner |
+| `balance_tracker/formatting.py` | Shared wording for dates, times and counts |
+| `balance_tracker/storage.py` | Load/save, automatic backups, import/export, CSV |
+| `balance_tracker/sync.py` | iPhone sync: change stamps, deletion markers, record-level merge |
 | `balance_tracker/notify.py` | Daily reminder digest, email/ntfy delivery, Windows scheduled task |
 | `balance_tracker/reminders.py` | Calendar (.ics) export |
-| `balance_tracker/sync.py` | iPhone sync: change stamps, deletion markers, record-level merge |
+| `balance_tracker/updates.py`, `logs.py` | Check for updates; the application log |
+| `balance_tracker/ui/` | PySide6 (Qt) interface: `main_window.py` (state and actions), `pages/` (one module per page), `dialogs/`, `charts.py`, `widgets.py`, `theme.py` |
 | `web/` | iPhone web app: `engine.js` (port of the engine), `app.js` (UI), service worker, manifest |
-| `balance_tracker/storage.py` | Load/save, automatic backups, import/export, CSV |
-| `balance_tracker/ui/` | PySide6 (Qt) interface: theme, pages, dialogs, custom charts |
