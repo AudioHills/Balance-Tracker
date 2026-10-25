@@ -146,13 +146,14 @@ function viewHome() {
   else if (below && s.low_balance_threshold > 0) html += `<div class="banner warning">Balance dips below your ${money(s.low_balance_threshold)} cushion ${when(below[0])}${amt(below[1])}.</div>`;
   else if (ago >= 7) html += `<div class="banner warning">It's been ${ago} days since your last check-in.</div>`;
 
-  const safe = fc.safeToSpend(today, 30, s.low_balance_threshold);
+  const [room, planSweeps] = spendingForecast();
+  const safe = room.safeToSpend(today, 30, s.low_balance_threshold);
   const low = fc.lowest(today, horizon);
-  const um = fc.unplannedByMonth().get(`${E.ymd(today).y}-${E.ymd(today).m}`) || 0;
+  const um = E.unplannedSummary(fc, today).thisMonth;
   html += `<div class="stats">
-    <div class="stat"><div class="t">Safe to spend</div><div class="v num ${safe < 0 ? "neg" : "pos"}">${money(Math.max(0, safe ?? 0))}</div><div class="s">next 30 days</div></div>
-    <div class="stat"><div class="t">Lowest ahead</div><div class="v num ${tone(low?.[1] ?? null)}">${low ? moneyShort(low[1]) : "—"}</div><div class="s">${low ? niceDate(low[0]) : ""}</div></div>
-    <div class="stat"><div class="t">Unplanned</div><div class="v num ${um < 0 ? "neg" : "pos"}">${moneyShort(Math.abs(um))}</div><div class="s">this month</div></div></div>`;
+    <div class="stat"><div class="t">Safe to spend</div><div class="v num ${safe < 0 ? "neg" : "pos"}">${money(Math.max(0, safe ?? 0))}</div><div class="s">${planSweeps ? "rest → debt plan" : "next 30 days"}</div></div>
+    <div class="stat"><div class="t">Lowest ahead</div><div class="v num ${hide ? "" : tone(low?.[1] ?? null)}">${!low ? "—" : hide ? MASK : moneyShort(low[1])}</div><div class="s">${low ? niceDate(low[0]) : ""}</div></div>
+    <div class="stat"><div class="t">Unplanned</div><div class="v num ${um < 0 ? "neg" : "pos"}">${um ? (um < 0 ? "−" : "+") + moneyShort(Math.abs(um)) : moneyShort(0)}</div><div class="s">this month</div></div></div>`;
 
   const cards = cardCharges();
   if (cards.length) {
@@ -164,6 +165,7 @@ function viewHome() {
     }
     html += `</div>`;
   }
+  html += paydayCard(room, planSweeps, hide);
 
   html += `<div class="card"><h2>Forecast<span class="right chips">${[[1, "1M"], [3, "3M"], [6, "6M"], [12, "1Y"]]
     .map(([m, t]) => `<button class="chip ${ui.range === m ? "on" : ""}" data-act="range" data-m="${m}">${t}</button>`).join("")}</span></h2>
@@ -176,8 +178,7 @@ function viewHome() {
     <div class="sub num ${tone(e.balance)}">${money(e.balance)}</div></div></div>`).join("") : `<div class="empty">Nothing scheduled</div>`;
   html += `</div>`;
 
-  const inc = data.items.filter((i) => i.active && i.kind === "income").reduce((a, i) => a + E.monthlyEquivalent(i), 0);
-  const bills = -data.items.filter((i) => i.active && i.kind === "bill").reduce((a, i) => a + E.monthlyEquivalent(i), 0);
+  const { income: inc, bills } = E.monthlyTotals(data.items, today);
   html += `<div class="card"><h2>Monthly snapshot</h2>
     <div class="kv"><span class="muted">Income</span><span class="num pos bold">${money(inc)}</span></div>
     <div class="kv"><span class="muted">Bills</span><span class="num bold">${money(bills)}</span></div>
@@ -207,17 +208,33 @@ function viewWelcome() {
     <p class="hint" style="text-align:center">Tip: tap Share → Add to Home Screen so it opens like an app and keeps your data.</p>`;
 }
 
-function cardCharges() {
-  const out = [];
-  for (const item of data.items) {
-    const card = item.paid_with ? E.findDebt(data, item.paid_with) : null;
-    if (!card) continue;
-    for (const o of E.occurrences(item, today - 14, today)) {
-      const key = `${item.id}|${E.toISO(o.date)}`;
-      if (!data.card_paid.includes(key)) out.push({ o, card, key });
-    }
-  }
-  return out.sort((a, b) => a.o.date - b.o.date);
+const cardCharges = () => E.unpaidCardCharges(data, today, 14).map((c) => ({ o: c.occurrence, card: c.card, key: c.key }));
+
+// The forecast to measure spending room on, and whether the payoff plan's extra payments were left
+// out. In "as much as my cushion allows" mode the plan sends every spare dollar to debt and shrinks
+// to fit what's spent, so spending room is measured before those payments (as "Can I afford it?" is).
+function spendingForecast() {
+  const soon = today + E.PAYDAY_WINDOW_DAYS;
+  const sweeps = !!plan && data.settings.debt_in_forecast && plan.payments.some((p) => p.extra && p.date >= today && p.date <= soon);
+  return sweeps ? [build([], false, null, soon + 1), true] : [fc, false];
+}
+
+function paydayCard(room, planSweeps, hide) {
+  const cushion = data.settings.low_balance_threshold;
+  const o = E.paydayOutlook(fc, today, cushion);
+  if (!o) return "";
+  const daily = planSweeps ? E.paydayOutlook(room, today, cushion).daily : o.daily;
+  const when = o.payday === null ? "no paycheque in 30 days"
+    : `${fmtDate(o.payday, { weekday: "short", month: "short", day: "numeric" })} · ${o.payday - today === 1 ? "tomorrow" : `in ${o.payday - today} days`}`;
+  const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+  return `<div class="card"><h2>${o.payday === null ? "Next 30 days" : "Until payday"}<span class="right muted">${when}</span></h2>
+    <div class="kv"><span class="muted">Spend up to</span><span class="num bold ${daily ? "pos" : "neg"}">${money(daily)} / day</span></div>
+    <div class="kv"><span class="muted">Going out before then</span><span class="num bold">${money(o.bills)}${o.billCount ? ` · ${plural(o.billCount, "bill")}` : ""}</span></div>
+    ${o.lowest ? `<div class="kv"><span class="muted">Lowest before payday</span><span class="num bold ${hide ? "" : tone(o.lowest[1])}">${hide ? MASK : money(o.lowest[1])} · ${niceDate(o.lowest[0])}</span></div>` : ""}
+    ${o.payday !== null ? `<div class="kv"><span class="muted">Paycheque</span><span class="num bold pos">${money(o.pay, true)}</span></div>` : ""}
+    <p class="hint" style="padding:6px 0 0">${daily
+      ? `Spend up to ${money(daily)} a day for ${plural(o.days, "day")} and you stay above your ${money(cushion)} cushion for the next 30 days — bills after payday included.${planSweeps ? " Your payoff plan's extra payments shrink to match what you spend." : ""}`
+      : `No room for extra spending right now without dipping below your ${money(cushion)} cushion.`}</p></div>`;
 }
 
 // ---------- chart
@@ -313,11 +330,11 @@ function viewDays() {
 // ---------- bills
 function viewBills() {
   let html = topbar("Income & Bills");
-  const inc = data.items.filter((i) => i.active && i.kind === "income").reduce((a, i) => a + E.monthlyEquivalent(i), 0);
-  const bills = -data.items.filter((i) => i.active && i.kind === "bill").reduce((a, i) => a + E.monthlyEquivalent(i), 0);
+  const { income: inc, bills } = E.monthlyTotals(data.items, today);
   html += `<div class="stats"><div class="stat"><div class="t">Income/mo</div><div class="v num pos">${moneyShort(inc)}</div></div>
     <div class="stat"><div class="t">Bills/mo</div><div class="v num">${moneyShort(bills)}</div></div>
     <div class="stat"><div class="t">Left over</div><div class="v num ${inc >= bills ? "pos" : "neg"}">${moneyShort(inc - bills)}</div></div></div>`;
+  if (ui.billFilter !== "income") html += categoryCard();
   html += `<div class="seg" style="margin-bottom:14px">${[["all", "All"], ["income", "Income"], ["bill", "Bills"]]
     .map(([k, t]) => `<button class="${ui.billFilter === k ? "on" : ""}" data-act="billfilter" data-k="${k}">${t}</button>`).join("")}</div>`;
   const items = data.items.filter((i) => ui.billFilter === "all" || i.kind === ui.billFilter);
@@ -343,6 +360,21 @@ function viewBills() {
   }
   html += `<button class="fab" data-act="additem" aria-label="Add">+</button>`;
   return html;
+}
+
+// Monthly bills by category: one colour, value at the bar's tip, anything past 8 folded into "Other"
+function categoryCard() {
+  let rows = E.billsByCategory(data.items, today);
+  if (rows.length < 2) return "";
+  if (rows.length > 8) {
+    const rest = rows.slice(7);
+    rows = [...rows.slice(0, 7), { category: "Other", monthly: rest.reduce((a, r) => a + r.monthly, 0), share: rest.reduce((a, r) => a + r.share, 0) }];
+  }
+  const top = rows[0].monthly;
+  return `<div class="card"><h2>Where your bills go<span class="right muted small">per month</span></h2><div class="catbars">${rows.map((r) =>
+    `<div class="cat" title="${esc(r.category)}: ${money(r.monthly)} a month (${(r.share * 100).toFixed(1)}%)"><span class="name">${esc(r.category)}</span>
+      <span class="track"><i style="width:${(r.monthly / top) * 70}%"></i><span class="num small">${moneyShort(r.monthly)}</span></span>
+      <span class="pct muted small">${Math.round(r.share * 100)}%</span></div>`).join("")}</div></div>`;
 }
 
 // ---------- debts
@@ -555,7 +587,8 @@ function sheetItem(id = null, kind = "bill") {
     <div class="field stack"><label>Notes</label><textarea id="it_notes" placeholder="Optional">${esc(i.notes)}</textarea></div></div>
     <div class="hint" id="it_preview"></div>
     <button class="btn primary block" data-act="saveitem" data-id="${esc(id || "")}">${id ? "Save" : "Add"}</button>
-    ${id ? `<button class="btn block" style="margin-top:10px" data-act="dupitem" data-id="${esc(id)}">Duplicate</button>
+    ${id ? `<button class="btn block" style="margin-top:10px" data-act="changefrom" data-id="${esc(id)}">Change amount from a date…</button>
+      <button class="btn block" style="margin-top:10px" data-act="dupitem" data-id="${esc(id)}">Duplicate</button>
       <button class="btn danger block" style="margin-top:10px" data-act="delitem" data-id="${esc(id)}">Delete</button>` : ""}`;
   openSheet(id ? "Edit" : kind === "income" ? "Add income" : "Add bill", body, (s) => {
     const upd = () => {
@@ -590,6 +623,40 @@ function readItem(id) {
     active: checked("it_active"), paid_with: kind === "bill" ? val("it_card") : "", overrides: old?.overrides || {},
     notes: val("it_notes").trim(),
   });
+}
+
+// ---------- change amount from a date on (rent going up)
+function sheetChangeFrom(id, whenISO = null) {
+  const item = E.findItem(data, id);
+  if (!item) return;
+  const nxt = E.nextOccurrence(item, today);
+  const when = whenISO || (nxt ? E.toISO(nxt.scheduled) : E.toISO(today));
+  openSheet(`Change “${item.name}”`, `<p class="hint" style="padding-top:0">For a ${item.kind === "income" ? "pay" : "bill"} that changes from a certain date — a rent increase, a new phone plan, a raise. Earlier dates keep ${money(item.amount)} and the schedule stays the same.</p>
+    <div class="form">${field("New amount", `<input id="cf_amt" inputmode="decimal" placeholder="0.00" value="${moneyInput(item.amount)}">`)}
+    ${field("Starting", `<input type="date" id="cf_date" value="${when}" min="${item.start_date}">`)}</div>
+    <div class="hint" id="cf_preview"></div>
+    <button class="btn primary block" data-act="savechangefrom" data-id="${esc(id)}">Change amount</button>`, (s) => {
+    const upd = () => {
+      const [head, tail] = E.changeAmountFrom(item, E.toDay(val("cf_date") || when), parseMoney(val("cf_amt")));
+      const from = E.toDay(val("cf_date") || when);
+      const next = [head, tail].filter(Boolean).flatMap((it) => E.occurrences(it, from, from + 800)).sort((a, b) => a.date - b.date).slice(0, 4);
+      $("#cf_preview", s).textContent = next.length ? "Next: " + next.map((o) => `${fmtDate(o.date, { month: "short", day: "numeric" })} ${money(Math.abs(o.amount))}`).join(" · ")
+        : "Nothing is scheduled on or after that date.";
+    };
+    s.querySelectorAll("input").forEach((el) => el.addEventListener("input", upd));
+    upd();
+  });
+}
+function saveChangeFrom(id) {
+  const item = E.findItem(data, id);
+  const amount = parseMoney(val("cf_amt"));
+  if (amount <= 0) { toast("Enter an amount"); return; }
+  const when = E.toDay(val("cf_date") || E.toISO(today));
+  const [head, tail] = E.changeAmountFrom(item, when, amount);
+  data.items[data.items.indexOf(item)] = head;
+  if (tail) data.items.push(tail);
+  closeSheet();
+  save(`“${item.name}” is ${money(amount)} from ${fmtDate(when, { month: "short", day: "numeric" })} on`, true);
 }
 
 // ---------- debts
@@ -682,12 +749,10 @@ function sheetHistory() {
   for (let k = 5; k >= 0; k--) { const m = E.ymd(E.addMonths(E.fromYMD(E.ymd(today).y, E.ymd(today).m, 1), -k, 1)); months.push([m, um.get(`${m.y}-${m.m}`) || 0]); }
   const top = Math.max(1, ...months.map(([, v]) => Math.abs(v)));
   const thisM = um.get(`${E.ymd(today).y}-${E.ymd(today).m}`) || 0;
-  const tracked = months.slice(0, 5).map(([, v], i) => [v, um.has(`${months[i][0].y}-${months[i][0].m}`)]).filter(([, has]) => has).map(([v]) => v);
-  const avg = tracked.length ? Math.trunc(tracked.reduce((a, b) => a + b, 0) / tracked.length) : null;
-  let total = 0; um.forEach((v) => (total += v));
+  const { average: avg, monthsTracked, total } = E.unplannedSummary(fc, today);
   const show = (v) => (v === null ? "—" : `<span class="${v < 0 ? "neg" : "pos"}">${money(Math.abs(v))}</span>`);
   let body = `<div class="stats"><div class="stat"><div class="t">This month</div><div class="v num">${show(thisM)}</div><div class="s">${thisM < 0 ? "over plan" : "ahead"}</div></div>
-    <div class="stat"><div class="t">Monthly avg</div><div class="v num">${show(avg)}</div><div class="s">${avg === null ? "needs a full month" : `last ${tracked.length} mo`}</div></div>
+    <div class="stat"><div class="t">Monthly avg</div><div class="v num">${show(avg)}</div><div class="s">${avg === null ? "needs a full month" : `last ${monthsTracked} mo`}</div></div>
     <div class="stat"><div class="t">Since start</div><div class="v num">${show(total)}</div><div class="s">${fc.checkins().length} check-ins</div></div></div>
     <div class="card"><h2>Unplanned spending by month</h2><div class="bars">${months.map(([m, v]) =>
     `<div class="b"><span class="${v < 0 ? "neg" : v > 0 ? "pos" : ""}">${v ? moneyShort(Math.abs(v)) : "—"}</span><i style="height:${(Math.abs(v) / top) * 80}%;background:var(${v < 0 ? "--negative" : v > 0 ? "--positive" : "--border"})"></i><span>${fmtDate(E.fromYMD(m.y, m.m, 1), { month: "short" })}</span></div>`).join("")}</div></div><div class="list">`;
@@ -707,7 +772,8 @@ function sheetSettings() {
   const theme = localStorage.getItem("bt-theme") || "system";
   openSheet("Settings", `<div class="form">${field("Account name", `<input id="se_name" value="${esc(s.account_name)}">`)}
     ${field("Low-balance cushion", `<input id="se_cushion" inputmode="decimal" value="${moneyInput(s.low_balance_threshold)}">`)}
-    ${field("Watch ahead", `<select id="se_months">${[1, 2, 3, 6, 9, 12, 18, 24, 36].map((m) => `<option value="${m}" ${s.forecast_months === m ? "selected" : ""}>${m} months</option>`).join("")}</select>`)}
+    ${field("Watch ahead", `<select id="se_months">${[...new Set([1, 2, 3, 6, 9, 12, 18, 24, 36, s.forecast_months])].sort((a, b) => a - b)
+      .map((m) => `<option value="${m}" ${s.forecast_months === m ? "selected" : ""}>${m} month${m === 1 ? "" : "s"}</option>`).join("")}</select>`)}
     ${field("Currency symbol", `<input id="se_cur" value="${esc(s.currency_symbol)}" maxlength="4">`)}
     ${field("Appearance", `<select id="se_theme">${opts({ system: "Match iPhone", light: "Light", dark: "Dark" }, theme)}</select>`)}
     ${toggle("Ask for my balance when I open the app", "se_prompt", localStorage.getItem("bt-prompt") !== "0")}</div>
@@ -796,6 +862,7 @@ function sheetEntry(ds) {
       <div class="row tap" data-act="ovchange" data-id="${esc(item.id)}" data-key="${key}" data-amt="${Math.abs(Number(ds.amt))}"><div class="main title">Change amount this time…</div></div>
       <div class="row tap" data-act="ovskip" data-id="${esc(item.id)}" data-key="${key}"><div class="main title">Skip this time</div></div>
       ${key in item.overrides ? `<div class="row tap" data-act="ovclear" data-id="${esc(item.id)}" data-key="${key}"><div class="main title">Restore normal amount</div></div>` : ""}
+      <div class="row tap" data-act="changefrom" data-id="${esc(item.id)}" data-key="${key}"><div class="main title">Change amount from this date on…</div></div>
       <div class="row tap" data-act="edititem" data-id="${esc(item.id)}"><div class="main title accent">Edit “${esc(item.name)}”…</div></div></div>`);
 }
 function delCheckpoint(id) {
@@ -1035,6 +1102,8 @@ document.addEventListener("click", async (ev) => {
       closeSheet(); save("Deleted", true); break;
     }
     case "entry": sheetEntry(ds); break;
+    case "changefrom": sheetChangeFrom(ds.id, ds.key || null); break;
+    case "savechangefrom": saveChangeFrom(ds.id); break;
     case "ovskip": case "ovchange": case "ovclear": {
       const item = E.findItem(data, ds.id);
       if (ds.act === "ovskip") item.overrides[ds.key] = null;

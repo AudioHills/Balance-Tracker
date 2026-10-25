@@ -138,6 +138,14 @@ button { cursor: pointer; }
 .bars .b i { display: block; width: 70%; border-radius: 6px 6px 3px 3px; min-height: 3px; }
 .bars .b span { margin-top: 4px; }
 
+/* ---------- bills by category ---------- */
+.catbars { display: grid; gap: 9px; }
+.cat { display: grid; grid-template-columns: minmax(72px, 32%) 1fr 36px; align-items: center; gap: 10px; font-size: 14px; }
+.cat .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cat .track { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.cat .track i { display: block; height: 12px; min-width: 2px; background: var(--accent); border-radius: 0 4px 4px 0; flex: none; }
+.cat .pct { text-align: right; }
+
 /* ---------- sheets ---------- */
 dialog.sheet {
   border: 0; padding: 0; margin: auto auto 0; width: 100%; max-width: 640px; max-height: 92dvh;
