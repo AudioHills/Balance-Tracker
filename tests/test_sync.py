@@ -1,6 +1,6 @@
 from datetime import date
 
-from balance_tracker.models import AppData, Checkpoint, Debt, RecurringItem, BILL, INCOME
+from balance_tracker.models import BILL, INCOME, AppData, Checkpoint, Debt, RecurringItem
 from balance_tracker.storage import Store
 from balance_tracker.sync import merge, same, stamp, sync_files, sync_payload, write_sync_file
 

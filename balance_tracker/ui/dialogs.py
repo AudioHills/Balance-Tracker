@@ -5,14 +5,34 @@ from datetime import date, timedelta
 
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
-    QFrame, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox, QVBoxLayout,
+    QButtonGroup,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QDoubleSpinBox,
+    QFormLayout,
+    QFrame,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QSpinBox,
+    QVBoxLayout,
 )
 
 from .. import money
-from ..forecast import Forecast, occurrences, shift_weekend, scheduled_dates
+from ..forecast import Forecast, occurrences, scheduled_dates, shift_weekend
 from ..models import (
-    AppData, BILL, Checkpoint, FREQUENCIES, INCOME, LAST_DAY, RecurringItem, WEEKEND_RULES,
+    BILL,
+    FREQUENCIES,
+    INCOME,
+    LAST_DAY,
+    WEEKEND_RULES,
+    AppData,
+    Checkpoint,
+    RecurringItem,
 )
 from . import theme
 from .widgets import DateField, MoneySpin, hbox, label
@@ -100,7 +120,7 @@ class ItemDialog(BaseDialog):
         self.second.setSpecialValueText("")
         self.second_hint = label("31 = last day of the month", "Hint")
         self.has_end = QCheckBox("Stops on")
-        self.end = date_edit((item.end_date if item and item.end_date else date.today() + timedelta(days=365)))
+        self.end = date_edit(item.end_date if item and item.end_date else date.today() + timedelta(days=365))
         self.has_end.setChecked(bool(item and item.end_date))
         self.weekend = QComboBox()
         for k, v in WEEKEND_RULES.items():
@@ -688,6 +708,7 @@ class RemindersDialog(BaseDialog):
 
     def accept(self):
         from PySide6.QtWidgets import QFileDialog
+
         from ..reminders import to_ics
         items = self._collect()
         if not items:
@@ -711,8 +732,10 @@ class NotifyDialog(BaseDialog):
 
     def __init__(self, data: AppData, folder, parent=None):
         import secrets as _secrets
+
         from PySide6.QtCore import QTime
         from PySide6.QtWidgets import QApplication, QScrollArea, QTimeEdit, QWidget
+
         from .. import notify
         super().__init__("Email & phone reminders",
                          "Get one short message on days something needs doing — e.g. “Pay Visa $11.99 — "
@@ -888,7 +911,9 @@ class NotifyDialog(BaseDialog):
 
     def send_test(self):
         import copy
-        from PySide6.QtGui import QGuiApplication, QCursor
+
+        from PySide6.QtGui import QCursor, QGuiApplication
+
         from .. import notify
         if not self._validate():
             return

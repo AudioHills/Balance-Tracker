@@ -1,12 +1,17 @@
-from datetime import date, timedelta
+from datetime import date
 
 import pytest
 
 from balance_tracker.forecast import (
-    Forecast, occurrences, scheduled_dates, shift_weekend, monthly_equivalent, next_occurrence,
+    Forecast,
+    monthly_equivalent,
+    next_occurrence,
+    occurrences,
+    scheduled_dates,
+    shift_weekend,
 )
-from balance_tracker.models import AppData, Checkpoint, RecurringItem, INCOME, BILL
-from balance_tracker.storage import Store, export_backup, read_backup, merge_data
+from balance_tracker.models import BILL, INCOME, AppData, Checkpoint, RecurringItem
+from balance_tracker.storage import Store, export_backup, merge_data, read_backup
 
 
 def item(**kw):

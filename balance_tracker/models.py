@@ -5,9 +5,8 @@ All money values are stored as integer cents to avoid floating point drift.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
-from typing import Optional
 
 SCHEMA_VERSION = 1
 
@@ -53,7 +52,7 @@ def new_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
-def _d(value) -> Optional[date]:
+def _d(value) -> date | None:
     if value in (None, ""):
         return None
     if isinstance(value, date):
@@ -70,7 +69,7 @@ class RecurringItem:
     kind: str = BILL
     frequency: str = "monthly"
     start_date: date = field(default_factory=date.today)
-    end_date: Optional[date] = None
+    end_date: date | None = None
     # Second day of the month for "Twice a month" (31 = last day of month)
     second_day: int = LAST_DAY
     weekend_rule: str = "none"
@@ -95,7 +94,7 @@ class RecurringItem:
         return d
 
     @classmethod
-    def from_dict(cls, d: dict) -> "RecurringItem":
+    def from_dict(cls, d: dict) -> RecurringItem:
         kind = d.get("kind", BILL)
         if kind not in (INCOME, BILL):
             raise ValueError(f"Unknown kind {kind!r}")
@@ -149,7 +148,7 @@ class Checkpoint:
         return d
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Checkpoint":
+    def from_dict(cls, d: dict) -> Checkpoint:
         return cls(
             id=str(d.get("id") or new_id()),
             date=_d(d["date"]),
@@ -186,7 +185,7 @@ class Debt:
         return d
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Debt":
+    def from_dict(cls, d: dict) -> Debt:
         kind = d.get("kind", "credit_card")
         return cls(
             id=str(d.get("id") or new_id()),
@@ -247,7 +246,7 @@ class Settings:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Settings":
+    def from_dict(cls, d: dict) -> Settings:
         s = cls()
         for k in asdict(s):
             if k in d:
@@ -283,19 +282,19 @@ class AppData:
         return sorted(self.checkpoints, key=lambda c: (c.date, c.created_at))
 
     @property
-    def start(self) -> Optional[Checkpoint]:
+    def start(self) -> Checkpoint | None:
         cps = self.sorted_checkpoints()
         return cps[0] if cps else None
 
     @property
-    def latest_checkpoint(self) -> Optional[Checkpoint]:
+    def latest_checkpoint(self) -> Checkpoint | None:
         cps = self.sorted_checkpoints()
         return cps[-1] if cps else None
 
-    def item(self, item_id: str) -> Optional[RecurringItem]:
+    def item(self, item_id: str) -> RecurringItem | None:
         return next((i for i in self.items if i.id == item_id), None)
 
-    def debt(self, debt_id: str) -> Optional[Debt]:
+    def debt(self, debt_id: str) -> Debt | None:
         return next((d for d in self.debts if d.id == debt_id), None)
 
     def add_checkpoint(self, cp: Checkpoint) -> None:
@@ -322,7 +321,7 @@ class AppData:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> "AppData":
+    def from_dict(cls, d: dict) -> AppData:
         if not isinstance(d, dict) or "items" not in d:
             raise ValueError("This file is not a Balance Tracker backup.")
         if int(d.get("schema", 1)) > SCHEMA_VERSION:

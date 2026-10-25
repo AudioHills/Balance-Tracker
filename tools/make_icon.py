@@ -19,8 +19,7 @@ if not render(256).save(str(out / "icon.ico")):
 print("wrote", out / "icon.ico")
 
 # Web app (iPhone home screen) icons
-from PySide6.QtCore import Qt  # noqa: E402
-from PySide6.QtGui import QImage, QPainter, QColor  # noqa: E402
+from PySide6.QtGui import QColor, QImage, QPainter  # noqa: E402
 
 web = out.parent / "web" / "icons"
 web.mkdir(parents=True, exist_ok=True)

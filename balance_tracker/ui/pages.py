@@ -6,19 +6,36 @@ import sys
 from datetime import date, datetime, timedelta
 
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QDesktopServices, QFont, QColor, QBrush
+from PySide6.QtGui import QBrush, QColor, QDesktopServices, QFont
 from PySide6.QtWidgets import (
-    QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame,
-    QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLineEdit, QMenu, QMessageBox,
-    QPushButton, QScrollArea, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView,
+    QButtonGroup,
+    QCheckBox,
+    QComboBox,
+    QFileDialog,
+    QFormLayout,
+    QGridLayout,
+    QHBoxLayout,
+    QHeaderView,
+    QInputDialog,
+    QLineEdit,
+    QMenu,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
 )
 
 from .. import money, storage
-from ..forecast import monthly_equivalent, next_occurrence, add_months, horizon_end
+from ..forecast import add_months, horizon_end, monthly_equivalent, next_occurrence
 from ..models import BILL, FREQUENCIES, INCOME
 from . import theme
 from .dialogs import date_edit, from_qdate, to_qdate
-from .widgets import MASK, Banner, BalanceChart, Card, EyeButton, MonthlyBars, MoneySpin, StatCard, hbox, label
+from .widgets import MASK, BalanceChart, Banner, Card, EyeButton, MoneySpin, MonthlyBars, StatCard, hbox, label
 
 
 def escape_html(text: str) -> str:
@@ -905,7 +922,7 @@ class SettingsPage:
         self.ctx.commit(theme_changed=theme_changed)
 
     def _refresh_sync(self):
-        from .. import sync, WEB_APP_URL
+        from .. import WEB_APP_URL, sync
         s = self.ctx.data.settings
         icloud = sync.icloud_drive()
         app_link = (f"<br>Phone app: <a href='{WEB_APP_URL}'>{WEB_APP_URL}</a> — open it in Safari, then "

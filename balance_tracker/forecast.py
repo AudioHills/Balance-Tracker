@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import calendar
 from collections import defaultdict
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Iterator, Optional
 
-from .models import AppData, Checkpoint, RecurringItem, INCOME, LAST_DAY
+from .models import INCOME, LAST_DAY, AppData, Checkpoint, RecurringItem
 
 STEP_DAYS = {"weekly": 7, "biweekly": 14, "fourweekly": 28}
 STEP_MONTHS = {"monthly": 1, "bimonthly": 2, "quarterly": 3, "semiannual": 6, "yearly": 12}
@@ -28,7 +28,7 @@ def clamp_day(year: int, month: int, day: int) -> date:
     return date(year, month, min(day, last))
 
 
-def add_months(d: date, months: int, day: Optional[int] = None) -> date:
+def add_months(d: date, months: int, day: int | None = None) -> date:
     m = d.month - 1 + months
     return clamp_day(d.year + m // 12, m % 12 + 1, day or d.day)
 
@@ -46,7 +46,7 @@ def _months_between(a: date, b: date) -> int:
     return (b.year - a.year) * 12 + (b.month - a.month)
 
 
-def scheduled_dates(item: RecurringItem, until: date, since: Optional[date] = None) -> Iterator[date]:
+def scheduled_dates(item: RecurringItem, until: date, since: date | None = None) -> Iterator[date]:
     """Yield the scheduled (pre-weekend-shift) dates of `item` up to `until`."""
     start = item.start_date
     end = min(until, item.end_date) if item.end_date else until
@@ -116,7 +116,7 @@ def occurrences(item: RecurringItem, start: date, end: date) -> list:
     return out
 
 
-def next_occurrence(item: RecurringItem, today: date) -> Optional[Occurrence]:
+def next_occurrence(item: RecurringItem, today: date) -> Occurrence | None:
     for horizon in (400, 4000):
         occ = occurrences(item, today, today + timedelta(days=horizon))
         if occ:
@@ -140,18 +140,18 @@ class Entry:
     amount: int
     balance: int
     category: str = ""
-    item_id: Optional[str] = None
-    scheduled: Optional[date] = None
-    checkpoint_id: Optional[str] = None
+    item_id: str | None = None
+    scheduled: date | None = None
+    checkpoint_id: str | None = None
     overridden: bool = False
-    projected: Optional[int] = None  # for check-ins: balance the plan expected
+    projected: int | None = None  # for check-ins: balance the plan expected
 
 
 class Forecast:
     """Day-by-day projected balance from the starting balance to `end`."""
 
-    def __init__(self, data: AppData, end: date, today: Optional[date] = None,
-                 extra: Optional[list] = None, suppress: Optional[dict] = None):
+    def __init__(self, data: AppData, end: date, today: date | None = None,
+                 extra: list | None = None, suppress: dict | None = None):
         """`extra`: additional Occurrences (e.g. planned debt payments).
         `suppress`: item_id -> date; that item's occurrences on/after the date are left out."""
         self.data = data
@@ -160,7 +160,7 @@ class Forecast:
         self.suppress = suppress or {}
         self.entries: list = []
         self.daily: dict = {}  # date -> end-of-day balance
-        self.start: Optional[date] = None
+        self.start: date | None = None
         self.end = end
         self._build()
 
@@ -245,11 +245,11 @@ class Forecast:
     def empty(self) -> bool:
         return not self.daily
 
-    def balance_on(self, d: date) -> Optional[int]:
+    def balance_on(self, d: date) -> int | None:
         """End-of-day balance on `d` (None if outside the projection)."""
         return self.daily.get(d)
 
-    def balance_before(self, d: date) -> Optional[int]:
+    def balance_before(self, d: date) -> int | None:
         """Balance at the start of day `d`, before that day's items."""
         if self.start is None or d < self.start:
             return None
@@ -272,16 +272,16 @@ class Forecast:
             d += one
         return best
 
-    def first_below(self, threshold: int, a: date, b: Optional[date] = None):
+    def first_below(self, threshold: int, a: date, b: date | None = None):
         for d, bal in self.daily.items():
             if d >= a and (b is None or d <= b) and bal < threshold:
                 return d, bal
         return None
 
-    def next_income(self, after: date) -> Optional[Entry]:
+    def next_income(self, after: date) -> Entry | None:
         return next((e for e in self.entries if e.kind == "income" and e.date > after), None)
 
-    def safe_to_spend(self, today: date, days: int = 30, cushion: int = 0) -> Optional[int]:
+    def safe_to_spend(self, today: date, days: int = 30, cushion: int = 0) -> int | None:
         """How much could be spent today without any day in the next `days`
         dropping below `cushion`. Spending today lowers every future balance,
         so this is simply the lowest future balance minus the cushion."""

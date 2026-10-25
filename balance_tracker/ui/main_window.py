@@ -2,22 +2,38 @@
 from __future__ import annotations
 
 import copy
-from datetime import date, timedelta
+from datetime import date
 
-from PySide6.QtCore import QObject, QPropertyAnimation, QTimer, Qt, Signal
+from PySide6.QtCore import QObject, QPropertyAnimation, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QMainWindow,
-    QMessageBox, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
+    QApplication,
+    QFileDialog,
+    QFrame,
+    QGraphicsOpacityEffect,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
 )
 
 from .. import money, storage
 from ..debts import full_forecast, make_plan
 from ..forecast import Forecast, projection_end
-from ..models import AppData, BILL, INCOME, Checkpoint, new_id
+from ..models import BILL, INCOME, AppData, Checkpoint, new_id
 from . import theme
 from .dialogs import (
-    AffordDialog, CheckInDialog, DebtDialog, ItemDialog, NotifyDialog, RemindersDialog, WelcomeDialog,
+    AffordDialog,
+    CheckInDialog,
+    DebtDialog,
+    ItemDialog,
+    NotifyDialog,
+    RemindersDialog,
+    WelcomeDialog,
 )
 from .icon import app_icon
 from .pages import CheckinsPage, DashboardPage, DebtsPage, ItemsPage, LedgerPage, SettingsPage
@@ -393,6 +409,7 @@ class MainWindow(QMainWindow):
         """Send today's digest from the app if it's due (the scheduled task may not have run yet)."""
         import copy
         import threading
+
         from .. import notify
         if getattr(self, "_sending", False) or getattr(self, "_failed_day", None) == self.today \
                 or not notify.due_now(self.data):
@@ -564,6 +581,7 @@ class MainWindow(QMainWindow):
         """Merge changes the iPhone saved into the sync folder. Returns 1 if anything changed."""
         import shutil
         from datetime import datetime as _dt
+
         from .. import storage, sync
         folder = self.sync_folder()
         if folder is None:

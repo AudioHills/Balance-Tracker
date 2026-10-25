@@ -157,8 +157,12 @@ QLineEdit:focus, QComboBox:focus, QTimeEdit:focus, QSpinBox:focus, QDoubleSpinBo
 }}
 QComboBox::drop-down {{ border: none; width: 26px; }}
 QComboBox::down-arrow {{ image: url("{arrow}"); width: 14px; height: 14px; }}
-QComboBox QAbstractItemView {{ background: {surface}; border: 1px solid {border}; selection-background-color: {selection}; }}
-QSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{ width: 0; border: none; }}
+QComboBox QAbstractItemView {{
+    background: {surface}; border: 1px solid {border}; selection-background-color: {selection};
+}}
+QSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
+    width: 0; border: none;
+}}
 QCheckBox {{ spacing: 8px; }}
 QPushButton#DateField {{
     text-align: left; font-weight: 500; padding: 6px 10px; border-radius: 8px;
@@ -174,7 +178,9 @@ QCalendarWidget QToolButton {{
 }}
 QCalendarWidget QToolButton:hover {{ background: {surface2}; }}
 QCalendarWidget QToolButton::menu-indicator {{ image: none; width: 0; }}
-QCalendarWidget #qt_calendar_prevmonth, QCalendarWidget #qt_calendar_nextmonth {{ qproperty-icon: none; min-width: 28px; }}
+QCalendarWidget #qt_calendar_prevmonth, QCalendarWidget #qt_calendar_nextmonth {{
+    qproperty-icon: none; min-width: 28px;
+}}
 QCalendarWidget #qt_calendar_prevmonth {{ qproperty-text: "‹"; font-size: 16pt; }}
 QCalendarWidget #qt_calendar_nextmonth {{ qproperty-text: "›"; font-size: 16pt; }}
 QCalendarWidget QSpinBox {{ min-width: 70px; }}

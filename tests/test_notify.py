@@ -2,7 +2,7 @@ import xml.etree.ElementTree as ET
 from datetime import date, datetime
 
 from balance_tracker import notify
-from balance_tracker.models import AppData, Checkpoint, Debt, RecurringItem, BILL, INCOME
+from balance_tracker.models import BILL, INCOME, AppData, Checkpoint, Debt, RecurringItem
 from balance_tracker.storage import Store
 
 TODAY = date(2026, 10, 12)
@@ -29,8 +29,8 @@ def test_compose_digest():
     assert texts[0] == "Pay Visa $11.99 — Spotify"
     # the payoff plan pays the card off on today's payday (as soon as it's safe)
     assert "Visa: pay $1,000.00 extra today (your payoff plan)" in texts
-    assert any("Rent $1,500.00 comes out tomorrow" == t for t in texts)
-    assert any("Pay $2,500.00 lands today" == t for t in texts)
+    assert any(t == "Rent $1,500.00 comes out tomorrow" for t in texts)
+    assert any(t == "Pay $2,500.00 lands today" for t in texts)
     assert dg.subject.startswith("Pay Visa $11.99 — Spotify (+")
     assert "<table" in dg.html and "Spotify" in dg.text
 

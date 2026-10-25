@@ -6,11 +6,27 @@ from datetime import date
 
 from PySide6.QtCore import QDate, QPoint, QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
-    QColor, QFont, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QTextCharFormat,
+    QColor,
+    QFont,
+    QIcon,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+    QTextCharFormat,
 )
 from PySide6.QtWidgets import (
-    QCalendarWidget, QDoubleSpinBox, QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel,
-    QPushButton, QSizePolicy, QVBoxLayout, QWidget,
+    QCalendarWidget,
+    QDoubleSpinBox,
+    QFrame,
+    QGraphicsDropShadowEffect,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
 )
 
 from .. import money

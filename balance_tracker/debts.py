@@ -17,10 +17,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from typing import Optional
 
 from .forecast import Forecast, Occurrence, add_months, clamp_day
-from .models import AppData, BILL, INCOME, Debt, RecurringItem
+from .models import BILL, INCOME, AppData, Debt, RecurringItem
 
 YEARS = 10
 MONTHS = YEARS * 12
@@ -53,12 +52,12 @@ class Plan:
         return sum(self.interest.values())
 
     @property
-    def debt_free(self) -> Optional[date]:
+    def debt_free(self) -> date | None:
         if not self.payoff or len(self.payoff) < len(self.interest):
             return None
         return max(self.payoff.values())
 
-    def next_extra(self, today: date) -> Optional[Payment]:
+    def next_extra(self, today: date) -> Payment | None:
         return next((p for p in self.payments if p.extra and p.date >= today), None)
 
     def occurrences(self, debts: list, include_extra: bool = True) -> list:
@@ -110,7 +109,7 @@ def _order(debts, bals, strategy):
 
 
 def simulate(debts: list, today: date, strategy: str, extras: dict, months: int = MONTHS,
-             rollover: bool = False, dated: Optional[list] = None) -> Plan:
+             rollover: bool = False, dated: list | None = None) -> Plan:
     """Run the month-by-month payoff.
     `extras`: month index -> extra cents, paid on the first target's due date (fixed mode).
     `dated`: [(date, cents)] extra payments on specific days (auto mode: as soon as it's safe).
@@ -220,8 +219,8 @@ def base_forecast(data: AppData, today: date, years: int = YEARS) -> Forecast:
     return Forecast(data, add_months(today, years * 12), today, suppress=suppress)
 
 
-def make_plan(data: AppData, today: date, strategy: Optional[str] = None, mode: Optional[str] = None,
-              base: Optional[Forecast] = None) -> Plan:
+def make_plan(data: AppData, today: date, strategy: str | None = None, mode: str | None = None,
+              base: Forecast | None = None) -> Plan:
     s = data.settings
     base_today = today
     today = plan_start(data, today)
@@ -287,8 +286,8 @@ def make_plan(data: AppData, today: date, strategy: Optional[str] = None, mode: 
     return plan
 
 
-def full_forecast(data: AppData, plan: Optional[Plan], today: date, end: date, extra=None,
-                  debt_extras: bool = True, source: Optional[AppData] = None) -> Forecast:
+def full_forecast(data: AppData, plan: Plan | None, today: date, end: date, extra=None,
+                  debt_extras: bool = True, source: AppData | None = None) -> Forecast:
     """The user's forecast, with planned debt payments added when that option is on.
     `source` lets callers project a modified copy of `data` (e.g. without a check-in)."""
     extra = list(extra or [])

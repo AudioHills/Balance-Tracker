@@ -2,7 +2,7 @@ from datetime import date
 
 from balance_tracker.debts import make_plan
 from balance_tracker.forecast import Forecast
-from balance_tracker.models import AppData, Checkpoint, Debt, RecurringItem, BILL, INCOME
+from balance_tracker.models import BILL, INCOME, AppData, Checkpoint, Debt, RecurringItem
 from balance_tracker.reminders import collect, to_ics
 
 TODAY = date(2026, 10, 1)
@@ -41,7 +41,7 @@ def test_collect_and_ics():
     for line in ics.split("\r\n"):
         assert len(line.encode("utf-8")) <= 75
     # stable ids: same input -> same UIDs
-    uids = [l for l in ics.split("\r\n") if l.startswith("UID:")]
+    uids = [line for line in ics.split("\r\n") if line.startswith("UID:")]
     assert len(uids) == len(set(uids)) == len(r)
 
 

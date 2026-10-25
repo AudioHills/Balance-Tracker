@@ -12,7 +12,6 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
 
 from .models import AppData
 
@@ -39,7 +38,7 @@ def _body(d: dict) -> dict:
     return {k: v for k, v in d.items() if k != "updated"}
 
 
-def stamp(prev: Optional[AppData], cur: AppData, now: Optional[str] = None) -> None:
+def stamp(prev: AppData | None, cur: AppData, now: str | None = None) -> None:
     """Mark what changed in `cur` since `prev` (the last saved copy)."""
     now = now or now_utc()
     for attr in ("items", "debts"):
@@ -116,7 +115,7 @@ def same(a: AppData, b: AppData) -> bool:
 
 
 # ---- the shared file -------------------------------------------------------
-def icloud_drive() -> Optional[Path]:
+def icloud_drive() -> Path | None:
     """The iCloud Drive folder from iCloud for Windows, if installed."""
     home = Path(os.environ.get("USERPROFILE") or Path.home())
     for name in ("iCloudDrive", "iCloud Drive"):
@@ -126,7 +125,7 @@ def icloud_drive() -> Optional[Path]:
     return None
 
 
-def default_sync_folder() -> Optional[Path]:
+def default_sync_folder() -> Path | None:
     root = icloud_drive()
     return root / SYNC_SUBFOLDER if root else None
 

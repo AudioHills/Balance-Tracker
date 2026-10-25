@@ -12,7 +12,7 @@ from datetime import date, datetime, time, timedelta, timezone
 
 from . import money
 from .forecast import add_months, occurrences
-from .models import AppData, INCOME
+from .models import INCOME, AppData
 
 
 @dataclass
@@ -53,7 +53,11 @@ def collect(data: AppData, plan, today: date, months: int = 6, card_charges: boo
         for p in plan.payments:
             if today <= p.date <= end:
                 mins, extra = by_key.get((p.debt_id, p.date), (0, 0))
-                by_key[(p.debt_id, p.date)] = (mins + (0 if p.extra else p.amount), extra + (p.amount if p.extra else 0))
+                if p.extra:
+                    extra += p.amount
+                else:
+                    mins += p.amount
+                by_key[(p.debt_id, p.date)] = (mins, extra)
         for (debt_id, d), (mins, extra) in sorted(by_key.items(), key=lambda kv: kv[0][1]):
             name = names.get(debt_id, "Debt")
             total = money.fmt(mins + extra)
@@ -106,4 +110,4 @@ def to_ics(reminders: list, at: str = "09:00", calendar_name: str = "Balance Tra
                       f"TRIGGER:-P{r.days_before}D", "END:VALARM"]
         lines.append("END:VEVENT")
     lines.append("END:VCALENDAR")
-    return "\r\n".join(_fold(l) for l in lines) + "\r\n"
+    return "\r\n".join(_fold(line) for line in lines) + "\r\n"

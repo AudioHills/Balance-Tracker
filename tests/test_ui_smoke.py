@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 QtWidgets = pytest.importorskip("PySide6.QtWidgets")
 
 from balance_tracker import storage  # noqa: E402
-from balance_tracker.models import AppData, BILL, INCOME, Checkpoint  # noqa: E402
+from balance_tracker.models import BILL, INCOME, AppData, Checkpoint  # noqa: E402
 from balance_tracker.ui import dialogs, theme  # noqa: E402
 from balance_tracker.ui.main_window import MainWindow  # noqa: E402
 
@@ -93,7 +93,7 @@ def test_checkin_dialog_math(app):
 
 
 def test_debts_and_afford(app, tmp_path, monkeypatch):
-    from balance_tracker.models import Debt, RecurringItem
+    from balance_tracker.models import RecurringItem
     t = date.today()
     data = AppData()
     data.checkpoints.append(Checkpoint(t, 300000))
@@ -130,6 +130,7 @@ def test_debts_and_afford(app, tmp_path, monkeypatch):
 
 def test_date_field_popup(app):
     from PySide6.QtCore import QDate
+
     from balance_tracker.ui.widgets import DateField
     f = DateField(QDate(2026, 10, 1))
     seen = []
@@ -170,6 +171,7 @@ def test_card_todo_and_reminders(app, tmp_path, monkeypatch):
 
 def test_iphone_sync_roundtrip(app, tmp_path):
     import json
+
     from balance_tracker import sync
     from balance_tracker.models import RecurringItem
     t = date.today()

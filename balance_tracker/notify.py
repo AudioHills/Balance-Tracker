@@ -23,12 +23,11 @@ from datetime import date, datetime, timedelta
 from email.message import EmailMessage
 from html import escape
 from pathlib import Path
-from typing import Optional
 
 from . import money
 from .debts import full_forecast, make_plan
 from .forecast import occurrences, projection_end
-from .models import AppData, INCOME
+from .models import INCOME, AppData
 
 TASK_NAME = "Balance Tracker Reminders"
 SECRETS_FILE = "secrets.json"
@@ -121,7 +120,7 @@ class Digest:
                 f"<p style='color:#677086;font-size:13px;margin-top:18px'>{escape(self.footer)}</p></div>")
 
 
-def compose(data: AppData, today: date) -> Optional[Digest]:
+def compose(data: AppData, today: date) -> Digest | None:
     """Today's reminders, or None if there's nothing worth sending."""
     s = data.settings
     if not data.has_start:
@@ -197,7 +196,7 @@ def compose(data: AppData, today: date) -> Optional[Digest]:
 # --------------------------------------------------------------------------
 # Delivery
 # --------------------------------------------------------------------------
-def send_email(s, password: str, subject: str, text: str, html: Optional[str] = None, timeout: int = 20) -> None:
+def send_email(s, password: str, subject: str, text: str, html: str | None = None, timeout: int = 20) -> None:
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = s.smtp_user or s.email_to
@@ -243,7 +242,7 @@ def deliver(data: AppData, folder: Path, digest: Digest) -> list:
     return errors
 
 
-def due_now(data: AppData, now: Optional[datetime] = None) -> bool:
+def due_now(data: AppData, now: datetime | None = None) -> bool:
     s = data.settings
     if not (s.email_enabled or s.ntfy_enabled):
         return False
@@ -252,7 +251,7 @@ def due_now(data: AppData, now: Optional[datetime] = None) -> bool:
     return s.notify_last_sent != now.date().isoformat() and (now.hour, now.minute) >= (hh, mm)
 
 
-def run_daily(store, now: Optional[datetime] = None) -> str:
+def run_daily(store, now: datetime | None = None) -> str:
     """Send today's digest once (used by the scheduled task and on app start)."""
     data = store.load()
     if not due_now(data, now):
@@ -304,10 +303,15 @@ def task_xml(at: str, program: str, args: str) -> str:
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo><Description>Sends Balance Tracker's daily payment reminders.</Description></RegistrationInfo>
   <Triggers>
-    <CalendarTrigger><StartBoundary>{start}</StartBoundary><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>
+    <CalendarTrigger>
+      <StartBoundary>{start}</StartBoundary>
+      <ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay>
+    </CalendarTrigger>
     <LogonTrigger><Delay>PT2M</Delay></LogonTrigger>
   </Triggers>
-  <Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Principals>
+    <Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal>
+  </Principals>
   <Settings>
     <StartWhenAvailable>true</StartWhenAvailable>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
@@ -316,7 +320,9 @@ def task_xml(at: str, program: str, args: str) -> str:
     <ExecutionTimeLimit>PT10M</ExecutionTimeLimit>
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
   </Settings>
-  <Actions Context="Author"><Exec><Command>{escape(program)}</Command><Arguments>{escape(args)}</Arguments></Exec></Actions>
+  <Actions Context="Author">
+    <Exec><Command>{escape(program)}</Command><Arguments>{escape(args)}</Arguments></Exec>
+  </Actions>
 </Task>
 """
 

@@ -1,8 +1,8 @@
 from datetime import date, timedelta
 
-from balance_tracker.debts import make_plan, simulate, minimum_payment, base_forecast
+from balance_tracker.debts import base_forecast, make_plan, minimum_payment, simulate
 from balance_tracker.forecast import Forecast
-from balance_tracker.models import AppData, Checkpoint, Debt, RecurringItem, INCOME, BILL
+from balance_tracker.models import BILL, INCOME, AppData, Checkpoint, Debt, RecurringItem
 
 TODAY = date(2026, 10, 1)
 
@@ -145,8 +145,8 @@ def test_extras_never_push_balance_below_cushion_randomized():
     import sys
     sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
     from test_web_engine import rand_data
+
     from balance_tracker.debts import full_forecast
-    from balance_tracker.forecast import Forecast
     rng = random.Random(4242)
     checked = 0
     for _ in range(120):

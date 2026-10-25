@@ -11,7 +11,14 @@ import pytest
 from balance_tracker.debts import full_forecast, make_plan
 from balance_tracker.forecast import monthly_equivalent, next_occurrence, projection_end
 from balance_tracker.models import (
-    AppData, Checkpoint, Debt, FREQUENCIES, RecurringItem, WEEKEND_RULES, BILL, INCOME,
+    BILL,
+    FREQUENCIES,
+    INCOME,
+    WEEKEND_RULES,
+    AppData,
+    Checkpoint,
+    Debt,
+    RecurringItem,
 )
 from balance_tracker.sync import merge, stamp
 
@@ -94,26 +101,32 @@ def run_node(tmp_path, scenarios):
 def test_engine_matches_python(tmp_path):
     rng = random.Random(20261001)
     scenarios, expected = [], []
-    for k in range(60):
+    for _ in range(60):
         today = date(2026, 1, 1) + timedelta(days=rng.randint(0, 700))
         data = rand_data(rng, today)
         scenarios.append({"data": data.to_dict(), "today": today.isoformat()})
         expected.append(python_result(data, today))
     got = run_node(tmp_path, scenarios)
-    for k, (exp, js) in enumerate(zip(expected, got)):
+    for k, (exp, js) in enumerate(zip(expected, got, strict=True)):
         for key in exp:
             assert js[key] == exp[key], f"scenario {k}: {key} differs"
+
+
+def _canonical(d: dict) -> str:
+    """JSON with records in id order, so merges that differ only in ordering compare equal."""
+    by_id = {key: sorted(d[key], key=lambda x: x["id"]) for key in ("items", "debts", "checkpoints")}
+    return json.dumps({**d, **by_id}, sort_keys=True)
 
 
 def test_merge_matches_python(tmp_path):
     rng = random.Random(7)
     scenarios, expected = [], []
-    for k in range(25):
+    for _ in range(25):
         today = date(2026, 3, 1)
         base = rand_data(rng, today)
         stamp(None, base, "2026-03-01T00:00:00.000Z")
         a, b = AppData.from_dict(base.to_dict()), AppData.from_dict(base.to_dict())
-        for side, t in ((a, "2026-03-02T00:00:00.000Z"), (b, "2026-03-0%dT00:00:00.000Z" % rng.randint(1, 3))):
+        for side, t in ((a, "2026-03-02T00:00:00.000Z"), (b, f"2026-03-0{rng.randint(1, 3)}T00:00:00.000Z")):
             prev = AppData.from_dict(side.to_dict())
             if side.items and rng.random() < 0.5:
                 side.items.pop(rng.randrange(len(side.items)))
@@ -130,21 +143,19 @@ def test_merge_matches_python(tmp_path):
         m.pop("saved_at")
         expected.append(m)
     got = run_node(tmp_path, scenarios)
-    for k, (exp, js) in enumerate(zip(expected, got)):
+    for k, (exp, js) in enumerate(zip(expected, got, strict=True)):
         back = AppData.from_dict(js["merged"]).to_dict()
         back.pop("saved_at")
-        norm = lambda d: json.dumps({**d, "items": sorted(d["items"], key=lambda x: x["id"]),
-                                     "debts": sorted(d["debts"], key=lambda x: x["id"]),
-                                     "checkpoints": sorted(d["checkpoints"], key=lambda x: x["id"])}, sort_keys=True)
-        assert norm(back) == norm(exp), f"merge scenario {k} differs"
+        assert _canonical(back) == _canonical(exp), f"merge scenario {k} differs"
 
 
 def test_reminders_match_python(tmp_path):
     import re
+
     from balance_tracker.reminders import collect, to_ics
     rng = random.Random(11)
     scenarios, expected = [], []
-    for k in range(30):
+    for _ in range(30):
         today = date(2026, 1, 1) + timedelta(days=rng.randint(0, 500))
         data = rand_data(rng, today)
         opts = dict(months=rng.choice([1, 3, 6]), card_charges=rng.random() < 0.8, debt_payments=rng.random() < 0.8,
@@ -159,6 +170,6 @@ def test_reminders_match_python(tmp_path):
         scenarios.append({"reminders": js_opts, "at": at, "data": data.to_dict(), "today": today.isoformat()})
     got = run_node(tmp_path, scenarios)
     assert sum(len(e["reminders"]) for e in expected) > 100  # the scenarios really produce reminders
-    for k, (exp, js) in enumerate(zip(expected, got)):
+    for k, (exp, js) in enumerate(zip(expected, got, strict=True)):
         assert js["reminders"] == exp["reminders"], f"scenario {k}: reminders differ"
         assert js["ics"] == exp["ics"], f"scenario {k}: calendar file differs"
