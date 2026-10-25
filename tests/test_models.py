@@ -2,7 +2,15 @@ from datetime import date
 
 import pytest
 
-from balance_tracker.formatting import ampm, days_away, months_away, nice_date, ordinal, relative_day
+from balance_tracker.formatting import (
+    ampm,
+    days_away,
+    months_away,
+    nice_date,
+    ordinal,
+    plural,
+    relative_day,
+)
 from balance_tracker.models import AppData, Settings, parse_hhmm
 
 
@@ -44,3 +52,5 @@ def test_formatting():
     assert [ordinal(n) for n in (1, 2, 3, 4, 11, 12, 13, 21, 22, 31)] == [
         "1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "22nd", "31st"]
     assert ampm("00:05") == "12:05 AM" and ampm("17:30") == "5:30 PM"
+    assert plural(1, "entry", "entries") == "1 entry" and plural(0, "entry", "entries") == "0 entries"
+    assert plural(2, "bill") == "2 bills"

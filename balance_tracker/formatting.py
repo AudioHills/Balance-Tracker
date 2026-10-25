@@ -88,9 +88,9 @@ def ordinal(n: int) -> str:
     return f"{n}{suffix}"
 
 
-def plural(n: int, word: str) -> str:
-    """plural(1, "day") -> "1 day", plural(3, "day") -> "3 days"."""
-    return f"{n} {word}{'' if n == 1 else 's'}"
+def plural(n: int, word: str, many: str | None = None) -> str:
+    """plural(1, "day") -> "1 day", plural(3, "day") -> "3 days", plural(2, "entry", "entries")."""
+    return f"{n} {word if n == 1 else many or word + 's'}"
 
 
 def ampm(hhmm: str) -> str:

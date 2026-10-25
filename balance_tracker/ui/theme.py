@@ -84,6 +84,8 @@ def apply_theme(app, mode: str) -> None:
     pal.setColor(QPalette.ToolTipBase, QColor(p["surface2"]))
     pal.setColor(QPalette.ToolTipText, QColor(p["text"]))
     pal.setColor(QPalette.PlaceholderText, QColor(p["muted"]))
+    pal.setColor(QPalette.Link, QColor(p["accent"]))  # links in rich-text labels
+    pal.setColor(QPalette.LinkVisited, QColor(p["accent"]))
     app.setPalette(pal)
     try:
         arrow = _arrow_image(p["muted"])
@@ -129,6 +131,11 @@ QPushButton#ThemeToggle:hover {{ border-color: {accent}; color: {accent}; }}
 #StatTitle {{ color: {muted}; font-size: 9pt; font-weight: 600; }}
 #StatValue {{ font-size: 18pt; font-weight: 700; }}
 #StatSub {{ color: {muted}; font-size: 9pt; }}
+#MetricValue {{ font-size: 14pt; font-weight: 700; }}
+#Kbd {{
+    font-family: Consolas, monospace; font-weight: 600; background: {surface2};
+    border: 1px solid {border}; border-radius: 6px; padding: 2px 8px;
+}}
 #Banner {{ border-radius: 12px; padding: 12px 16px; font-weight: 600; }}
 #Banner[tone="warning"] {{ background: {warning_soft}; color: {warning}; }}
 #Banner[tone="negative"] {{ background: {negative_soft}; color: {negative}; }}
@@ -160,8 +167,9 @@ QComboBox::down-arrow {{ image: url("{arrow}"); width: 14px; height: 14px; }}
 QComboBox QAbstractItemView {{
     background: {surface}; border: 1px solid {border}; selection-background-color: {selection};
 }}
-QSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
-    width: 0; border: none;
+/* No arrow buttons. They need an explicit zero size at the border, or Qt leaves the text field 1px wide. */
+QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {{
+    subcontrol-origin: border; width: 0px; height: 0px; border: none;
 }}
 QCheckBox {{ spacing: 8px; }}
 QPushButton#DateField {{

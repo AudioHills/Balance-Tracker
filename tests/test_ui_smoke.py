@@ -8,6 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 QtWidgets = pytest.importorskip("PySide6.QtWidgets")
 
 from balance_tracker import storage  # noqa: E402
+from balance_tracker.forecast import add_months  # noqa: E402
 from balance_tracker.models import BILL, INCOME, AppData, Checkpoint  # noqa: E402
 from balance_tracker.ui import dialogs, theme  # noqa: E402
 from balance_tracker.ui.main_window import MainWindow  # noqa: E402
@@ -240,3 +241,179 @@ def test_checkin_explains_items_still_to_come(app, tmp_path):
     w.commit()
     assert w.pages[0].c_today.value.text() == "$850.00"
     assert "Bank showed $2,500.00 at check-in" in w.pages[0].c_today.sub.text()
+
+
+# ---- 2.0 ---------------------------------------------------------------------
+def sample_window(tmp_path, **settings):
+    from balance_tracker.models import RecurringItem
+    t = date.today()
+    data = AppData()
+    data.checkpoints.append(Checkpoint(t, 150000))
+    data.items.append(RecurringItem("Pay", 200000, INCOME, "biweekly", t + timedelta(days=5)))
+    data.items.append(RecurringItem("Rent", 120000, BILL, "monthly", t + timedelta(days=8), category="Housing"))
+    data.items.append(RecurringItem("Phone", 6000, BILL, "monthly", t + timedelta(days=2), category="Utilities"))
+    for k, v in settings.items():
+        setattr(data.settings, k, v)
+    return MainWindow(storage.Store(tmp_path), data), t
+
+
+def test_amount_boxes_have_room_to_show_their_text(app, tmp_path):
+    """The stylesheet once left every spin box's text field 1px wide, so amounts looked blank."""
+    theme.apply_theme(app, "light")
+    w, _ = sample_window(tmp_path)
+    w.show()
+    w.go(5)
+    app.processEvents()
+    boxes = [b for b in w.findChildren(QtWidgets.QAbstractSpinBox) if b.isVisible()]
+    assert boxes and all(b.lineEdit().width() > b.width() - 30 for b in boxes)
+
+
+def test_payday_card_and_category_breakdown(app, tmp_path):
+    w, t = sample_window(tmp_path)
+    dash = w.pages[0]
+    assert not dash.payday_box.isHidden() and "Until payday" in dash.payday_title.text()
+    assert dash.m_bills.value.text() == "$60.00" and "/ day" in dash.m_daily.value.text()
+    w.go(2)
+    items = w.pages[2]
+    assert not items.categories.isHidden()
+    assert [r[0] for r in items.cat_bars.rows] == ["Housing", "Utilities"]
+
+
+def test_card_rows_are_replaced_not_stacked(app, tmp_path):
+    """Old rows must disappear at once when the card list is rebuilt, not linger until deleted."""
+    from balance_tracker.models import Debt, RecurringItem
+    t = date.today()
+    data = AppData()
+    data.checkpoints.append(Checkpoint(t - timedelta(days=3), 300000))
+    visa = Debt("Visa", 50000, 20.0)
+    data.debts.append(visa)
+    data.items.append(RecurringItem("Netflix", 1899, BILL, "monthly", t - timedelta(days=1), paid_with=visa.id))
+    w = MainWindow(storage.Store(tmp_path), data)
+    w.show()
+    for _ in range(3):
+        w.refresh_all()
+    app.processEvents()  # shows the new rows; deferred deletes of the old ones are still pending
+    labels = w.pages[0].card_box.findChildren(QtWidgets.QLabel)
+    assert len([lb for lb in labels if lb.isVisible() and "Netflix" in lb.text()]) == 1
+
+
+def test_change_amount_from_a_date(app, tmp_path, monkeypatch):
+    w, t = sample_window(tmp_path)
+    rent = w.data.items[1]
+    when = add_months(rent.start_date, 1)  # the second rent payment and later
+
+    def exec_(self):
+        self.amount.set_cents(130000)
+        self.when.setDate(when)
+        self.accept()
+        return True
+    monkeypatch.setattr(dialogs.ChangeAmountDialog, "exec", exec_)
+    w.change_amount_from(rent.id)
+    rents = [e for e in w.forecast.entries if e.description == "Rent"]
+    assert [e.amount for e in rents[:3]] == [-120000, -130000, -130000]
+    assert len([i for i in w.data.items if i.name == "Rent"]) == 2
+    w.undo()
+    assert [i.amount for i in w.data.items if i.name == "Rent"] == [120000]
+
+
+def test_ledger_search(app, tmp_path):
+    w, t = sample_window(tmp_path)
+    w.go(1)
+    page = w.pages[1]
+    page.search.setText("hous")  # matches the Housing category
+    shown = {page.table.item(r, 1).text() for r in range(page.table.rowCount())}
+    assert shown == {"Rent"} and page.summary.text().startswith("Matching")
+    page.search.clear()
+    assert page.table.rowCount() > 10  # every day again
+
+
+def test_undo_stack_and_sync_clears_it(app, tmp_path):
+    w, _ = sample_window(tmp_path)
+    w.delete_item(w.data.items[2].id)
+    w.delete_item(w.data.items[1].id)
+    assert len(w.data.items) == 1
+    w.undo()
+    w.undo()
+    assert [i.name for i in w.data.items] == ["Pay", "Rent", "Phone"]
+    w.undo()  # nothing left: says so instead of failing
+    assert w.toast_w.text.text() == "Nothing to undo"
+
+
+def test_duplicate_is_only_added_when_saved(app, tmp_path, monkeypatch):
+    w, _ = sample_window(tmp_path)
+    monkeypatch.setattr(dialogs.ItemDialog, "exec", lambda self: False)
+    w.duplicate_item(w.data.items[1].id)
+    assert len(w.data.items) == 3
+    monkeypatch.setattr(dialogs.ItemDialog, "exec", lambda self: self.accept() or True)
+    w.duplicate_item(w.data.items[1].id)
+    copy = w.data.items[-1]
+    assert copy.name == "Rent (copy)" and copy.id != w.data.items[1].id
+
+
+def test_settings_only_save_what_changed(app, tmp_path):
+    w, _ = sample_window(tmp_path)
+    page = w.pages[5]
+    w.data.settings.low_balance_threshold = 77700  # e.g. just synced from the phone; the page hasn't redrawn
+    page.theme.setCurrentIndex(2)
+    assert w.data.settings.theme == "dark" and w.data.settings.low_balance_threshold == 77700
+    theme.apply_theme(app, "light")
+
+
+def test_check_for_updates(app, tmp_path, monkeypatch):
+    from balance_tracker import updates
+    from balance_tracker.ui.pages import settings as settings_page
+    monkeypatch.setattr(settings_page, "run_in_background", lambda parent, work, done: done(*_call(work)))
+    w, _ = sample_window(tmp_path)
+    page = w.pages[5]
+    monkeypatch.setattr(updates, "latest_release", lambda: updates.Release("99.0.0", "https://example.com"))
+    page.check_updates()
+    assert "99.0.0 is available" in page.update_status.text()
+    monkeypatch.setattr(updates, "latest_release", lambda: updates.Release("0.1", "https://example.com"))
+    page.check_updates()
+    assert "up to date" in page.update_status.text()
+
+    def offline():
+        raise OSError("no network")
+    monkeypatch.setattr(updates, "latest_release", offline)
+    page.check_updates()
+    assert "Couldn't reach GitHub" in page.update_status.text() and page.update_btn.isEnabled()
+
+
+def _call(work):
+    try:
+        return work(), None
+    except Exception as e:  # noqa: BLE001
+        return None, e
+
+
+def test_shortcuts_are_bound_and_listed(app, tmp_path, monkeypatch):
+    from PySide6.QtGui import QKeySequence, QShortcut
+    w, _ = sample_window(tmp_path)
+    shown = []
+    monkeypatch.setattr(dialogs.ShortcutsDialog, "exec", lambda self: shown.append(self) or 0)
+    w.show_shortcuts()
+    assert shown
+    bound = {s.key().toString() for s in w.findChildren(QShortcut)}
+    assert {QKeySequence(k).toString() for k, _, _ in w.shortcuts} <= bound
+    w.focus_search()
+    assert w.stack.currentIndex() == 1
+
+
+def test_debt_before_a_starting_balance_does_not_crash(app, tmp_path):
+    from balance_tracker.models import Debt
+    data = AppData()
+    data.debts.append(Debt("Visa", 100000, 19.99))
+    w = MainWindow(storage.Store(tmp_path), data)
+    w.go(3)
+    assert w.pages[3].c_free.value.text() == "—"
+
+
+def test_spending_room_is_measured_before_plan_extras(app, tmp_path):
+    from balance_tracker.models import Debt
+    w, t = sample_window(tmp_path, debt_in_forecast=True, low_balance_threshold=10000)
+    w.data.debts.append(Debt("Visa", 500000, 19.99, due_day=28))
+    w.commit()
+    assert any(p.extra for p in w.plan.payments)
+    dash = w.pages[0]
+    assert dash.c_safe.value.text() != "$0.00" and "debt plan" in dash.c_safe.sub.text()
+    assert dash.m_daily.value.text() != "$0.00 / day"

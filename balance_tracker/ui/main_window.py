@@ -1,11 +1,14 @@
-"""Main window: sidebar navigation, shared state, and all data-changing actions."""
+"""Main window: sidebar navigation, shared state, and every action that changes the data."""
 from __future__ import annotations
 
+import contextlib
 import copy
+import logging
 from datetime import date
+from pathlib import Path
 
-from PySide6.QtCore import QObject, QPropertyAnimation, Qt, QTimer, Signal
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtCore import QEvent, QPropertyAnimation, Qt, QTimer
+from PySide6.QtGui import QCursor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -14,6 +17,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QStackedWidget,
@@ -21,27 +25,39 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import money, storage
-from ..debts import full_forecast, make_plan
-from ..forecast import Forecast, projection_end
-from ..models import BILL, INCOME, AppData, Checkpoint, new_id
+from .. import money, notify, storage, sync
+from ..debts import Plan, full_forecast, make_plan
+from ..forecast import Forecast, change_amount_from, projection_end
+from ..formatting import ampm, month_day
+from ..models import BILL, INCOME, AppData, Checkpoint, RecurringItem, new_id
 from . import theme
 from .dialogs import (
     AffordDialog,
+    ChangeAmountDialog,
     CheckInDialog,
     DebtDialog,
     ItemDialog,
     NotifyDialog,
     RemindersDialog,
+    ShortcutsDialog,
     WelcomeDialog,
 )
 from .icon import app_icon
-from .pages import CheckinsPage, DashboardPage, DebtsPage, ItemsPage, LedgerPage, SettingsPage
-from .widgets import hbox, label
+from .pages import CheckinsPage, DashboardPage, DebtsPage, ItemsPage, LedgerPage, Page, SettingsPage
+from .widgets import MASK, EyeButton, hbox, label
+from .workers import run_in_background
+
+log = logging.getLogger(__name__)
+
+SIDEBAR_WIDTH = 230
+UNDO_LEVELS = 25
+LEDGER, ITEMS = 1, 2  # page indexes used by actions
 
 
 class Toast(QFrame):
-    def __init__(self, parent):
+    """A short message near the bottom of the window, optionally with an Undo button."""
+
+    def __init__(self, parent: QMainWindow):
         super().__init__(parent)
         self.setObjectName("Card")
         lay = QHBoxLayout(self)
@@ -62,22 +78,27 @@ class Toast(QFrame):
         self.hide()
 
     def _do_undo(self):
+        self.hide()
         if self._undo_cb:
             self._undo_cb()
-        self.hide()
 
     def show_text(self, text: str, undo_cb=None):
         self.text.setText(text)
         self._undo_cb = undo_cb
         self.undo.setVisible(undo_cb is not None)
         self.adjustSize()
-        par = self.parentWidget()
-        self.move((par.width() - self.width()) // 2 + 110, par.height() - self.height() - 28)
+        self.place()
         self.anim.stop()
         self.fx.setOpacity(1)
         self.show()
         self.raise_()
         self.timer.start(5000 if undo_cb else 2600)
+
+    def place(self):
+        """Centred over the page area (right of the sidebar), near the bottom."""
+        par = self.parentWidget()
+        left = SIDEBAR_WIDTH + (par.width() - SIDEBAR_WIDTH - self.width()) // 2
+        self.move(max(0, left), par.height() - self.height() - 28)
 
     def _fade(self):
         self.anim.setDuration(400)
@@ -86,21 +107,22 @@ class Toast(QFrame):
         self.anim.start()
 
 
-class _Sender(QObject):
-    """Sends the daily digest off the UI thread."""
-    done = Signal(str, list)  # (date sent, errors)
-
-
 class MainWindow(QMainWindow):
-    NAV = ["Dashboard", "Day by day", "Income & Bills", "Debts", "Check-ins", "Settings"]
+    NAV = [("◉", "Dashboard"), ("☰", "Day by day"), ("⇅", "Income & Bills"), ("◈", "Debts"), ("✓", "Check-ins"),
+           ("⚙", "Settings")]
 
-    def __init__(self, store: storage.Store, data: AppData):
+    def __init__(self, store: storage.Store, data: AppData, today: date | None = None):
         super().__init__()
         self.store = store
         self.data = data
-        self.today = date.today()
-        self._ledger_end = None
-        self._undo = None
+        self.today = today or date.today()
+        self.plan: Plan | None = None
+        self.sync_error = ""  # last problem writing the iPhone sync file, shown in Settings
+        self._ledger_end: date | None = None
+        self._undo_stack: list[dict] = []
+        self._sending = False  # a reminder digest is being sent
+        self._failed_day: date | None = None  # don't retry a failed digest every minute
+        self._sync_seen: dict | None = None  # sync-folder file times at the last merge
         money.set_symbol(data.settings.currency_symbol)
         self.setWindowTitle("Balance Tracker")
         self.setWindowIcon(app_icon())
@@ -117,34 +139,27 @@ class MainWindow(QMainWindow):
         h.addWidget(self.stack, 1)
         self.setCentralWidget(root)
 
-        self.pages = [DashboardPage(self), LedgerPage(self), ItemsPage(self), DebtsPage(self),
-                      CheckinsPage(self), SettingsPage(self)]
+        self.pages: list[Page] = [DashboardPage(self), LedgerPage(self), ItemsPage(self), DebtsPage(self),
+                                  CheckinsPage(self), SettingsPage(self)]
         for p in self.pages:
             self.stack.addWidget(p.widget)
         self.toast_w = Toast(self)
-        self.go(0)
+        self._install_shortcuts()
 
-        for i in range(len(self.NAV)):
-            QShortcut(QKeySequence(f"Ctrl+{i + 1}"), self, lambda i=i: self.go(i))
-        QShortcut(QKeySequence("Ctrl+K"), self, self.check_in)
-        QShortcut(QKeySequence("Ctrl+I"), self, lambda: self.add_item(INCOME))
-        QShortcut(QKeySequence("Ctrl+B"), self, lambda: self.add_item(BILL))
-        QShortcut(QKeySequence("Ctrl+D"), self, self.add_debt)
-        QShortcut(QKeySequence("Ctrl+A"), self, self.afford)
-        QShortcut(QKeySequence("Ctrl+T"), self, self.toggle_theme)
-
-        # Roll the "today" marker over at midnight if the app is left open.
-        self._sender = _Sender()
-        self._sender.done.connect(self._digest_done)
+        # Once a minute: send a due reminder, pick up iPhone edits, roll "today" over at midnight.
         self.clock = QTimer(self, interval=60_000, timeout=self._tick)
         self.clock.start()
+        for p in self.pages:  # every page starts complete; afterwards they refresh when shown
+            p.refresh()
+            p.dirty = False
+        self.go(0)
         self.refresh_all()
 
     # ---- layout --------------------------------------------------------
     def _build_sidebar(self) -> QWidget:
         side = QFrame()
         side.setObjectName("Sidebar")
-        side.setFixedWidth(230)
+        side.setFixedWidth(SIDEBAR_WIDTH)
         v = QVBoxLayout(side)
         v.setContentsMargins(16, 22, 16, 18)
         v.setSpacing(4)
@@ -166,9 +181,8 @@ class MainWindow(QMainWindow):
         v.addLayout(brand)
         v.addSpacing(22)
         self.nav_btns = []
-        glyphs = ["◉", "☰", "⇅", "◈", "✓", "⚙"]
-        for i, (name, g) in enumerate(zip(self.NAV, glyphs)):
-            b = QPushButton(f"{g}   {name}".replace("&", "&&"))
+        for i, (glyph, name) in enumerate(self.NAV):
+            b = QPushButton(f"{glyph}   {name}".replace("&", "&&"))
             b.setObjectName("NavButton")
             b.setCheckable(True)
             b.setCursor(Qt.PointingHandCursor)
@@ -184,7 +198,6 @@ class MainWindow(QMainWindow):
         bl.setContentsMargins(14, 12, 14, 12)
         bl.setSpacing(2)
         self.side_label = label("", "SidebarBalanceLabel")
-        from .widgets import EyeButton
         self.side_eye = EyeButton()
         self.side_eye.clicked.connect(self.toggle_balance)
         self.side_balance = label("—", "SidebarBalance")
@@ -200,6 +213,33 @@ class MainWindow(QMainWindow):
         ci.clicked.connect(self.check_in)
         v.addWidget(ci)
         return side
+
+    def _install_shortcuts(self):
+        """One table drives both the key bindings and the F1 list."""
+        self.shortcuts = [
+            ("Ctrl+K", "Check in your balance", self.check_in),
+            ("Ctrl+I", "Add income", lambda: self.add_item(INCOME)),
+            ("Ctrl+B", "Add a bill", lambda: self.add_item(BILL)),
+            ("Ctrl+D", "Add a debt", self.add_debt),
+            ("Ctrl+A", "Can I afford it?", self.afford),
+            ("Ctrl+F", "Search Day by day or Income & Bills", self.focus_search),
+            ("Ctrl+Z", "Undo the last change", self.undo),
+            ("Ctrl+T", "Switch between light and dark", self.toggle_theme),
+            ("F1", "Show these shortcuts", self.show_shortcuts),
+        ]
+        for i in range(len(self.NAV)):
+            QShortcut(QKeySequence(f"Ctrl+{i + 1}"), self, lambda i=i: self.go(i))
+        for keys, _, action in self.shortcuts:
+            QShortcut(QKeySequence(keys), self, action)
+
+    def show_shortcuts(self):
+        rows = [(f"Ctrl+1 … Ctrl+{len(self.NAV)}", "Go to " + ", ".join(n for _, n in self.NAV))]
+        ShortcutsDialog(rows + [(k, what) for k, what, _ in self.shortcuts], self).exec()
+
+    def focus_search(self):
+        if not self.pages[self.stack.currentIndex()].focus_search():
+            self.go(LEDGER)
+            self.pages[LEDGER].focus_search()
 
     def toggle_balance(self):
         self.data.settings.hide_balance = not self.data.settings.hide_balance
@@ -218,10 +258,12 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(i)
         for k, b in enumerate(self.nav_btns):
             b.setChecked(k == i)
+        if self.pages[i].dirty:
+            self._refresh_page(i)
 
     def show_day(self, d: date):
-        self.go(1)
-        self.pages[1].show_day(d)
+        self.go(LEDGER)
+        self.pages[LEDGER].show_day(d)
 
     # ---- state ---------------------------------------------------------
     def recompute(self):
@@ -230,7 +272,8 @@ class MainWindow(QMainWindow):
 
     def build_forecast(self, extra=None, data: AppData | None = None, end: date | None = None,
                        debt_extras: bool = True) -> Forecast:
-        """The day-by-day forecast, including planned debt payments when that option is on."""
+        """The day-by-day forecast, including planned debt payments when that option is on.
+        `data` projects a modified copy (e.g. without today's check-in)."""
         if end is None:
             end = projection_end(self.data, self.today)
             if self._ledger_end and self._ledger_end > end:
@@ -238,32 +281,44 @@ class MainWindow(QMainWindow):
         return full_forecast(self.data, self.plan, self.today, end, extra, debt_extras, source=data)
 
     def extend_forecast(self, end: date):
+        """Make the forecast reach `end` (the Day by day page can look further ahead than usual)."""
         self._ledger_end = end
         self.recompute()
 
     def refresh_all(self):
+        """Bring the sidebar and the visible page up to date; other pages catch up when shown."""
         self._update_theme_button()
+        self._refresh_sidebar()
         for p in self.pages:
-            p.refresh()
+            p.dirty = True
+        self._refresh_page(self.stack.currentIndex())
+
+    def _refresh_page(self, i: int):
+        self.pages[i].refresh()
+        self.pages[i].dirty = False
+
+    def _refresh_sidebar(self):
         f, s = self.forecast, self.data.settings
         self.side_label.setText(f"{s.account_name.upper()} · TODAY")
         bal = f.balance_on(self.today)
-        from .widgets import MASK
         self.side_eye.set_state(s.hide_balance)
         self.side_balance.setText(MASK if s.hide_balance else money.fmt(bal))
-        col = theme.colors()
-        tone = "text" if s.hide_balance or bal is None or bal >= s.low_balance_threshold else \
-            ("warning" if bal >= 0 else "negative")
-        self.side_balance.setStyleSheet(f"color: {col[tone]};")
+        if s.hide_balance or bal is None or bal >= s.low_balance_threshold:
+            tone = "text"
+        else:
+            tone = "warning" if bal >= 0 else "negative"
+        self.side_balance.setStyleSheet(f"color: {theme.colors()[tone]};")
         nxt = f.next_income(self.today) if not f.empty else None
-        self.side_next.setText(f"Next income {nxt.date.strftime('%b %d')} · {money.fmt(nxt.amount)}" if nxt else "")
+        self.side_next.setText(f"Next income {month_day(nxt.date)} · {money.fmt(nxt.amount)}" if nxt else "")
 
     def commit(self, theme_changed: bool = False, toast: str | None = None, undoable: bool = False,
                restamp: bool = True):
+        """Save the data, push it to the sync folder, recompute and refresh."""
         money.set_symbol(self.data.settings.currency_symbol)
         try:
             self.store.save(self.data, restamp=restamp)
         except OSError as e:
+            log.error("Saving failed: %s", e)
             QMessageBox.critical(self, "Couldn't save", f"Your changes could not be saved:\n{e}")
         self._write_sync()
         if theme_changed:
@@ -274,16 +329,20 @@ class MainWindow(QMainWindow):
             self.toast(toast, undoable)
 
     def toast(self, text: str, undoable: bool = False):
-        self.toast_w.show_text(text, self.undo if undoable and self._undo else None)
+        self.toast_w.show_text(text, self.undo if undoable and self._undo_stack else None)
 
     def snapshot(self):
-        self._undo = copy.deepcopy(self.data.to_dict())
+        """Remember the data as it is now, so the next change can be undone."""
+        self._undo_stack.append(self.data.to_dict())
+        del self._undo_stack[:-UNDO_LEVELS]
 
     def undo(self):
-        if self._undo:
-            self.data = AppData.from_dict(self._undo)
-            self._undo = None
-            self.commit(toast="Undone")
+        if not self._undo_stack:
+            self.toast("Nothing to undo")
+            return
+        old_theme = self.data.settings.theme
+        self.data = AppData.from_dict(self._undo_stack.pop())
+        self.commit(theme_changed=self.data.settings.theme != old_theme, toast="Undone")
 
     def _tick(self):
         self.maybe_send_digest()
@@ -295,12 +354,12 @@ class MainWindow(QMainWindow):
 
     # ---- actions -------------------------------------------------------
     def first_run(self) -> bool:
-        dlg = WelcomeDialog(self)
+        dlg = WelcomeDialog(self, today=self.today)
         if dlg.exec():
             self.data.add_checkpoint(dlg.result_checkpoint)
             self.data.settings.account_name = dlg.result_account
             self.commit(toast="You're set! Now add your paycheque and bills.")
-            self.go(2)
+            self.go(ITEMS)
             return True
         return False
 
@@ -319,34 +378,62 @@ class MainWindow(QMainWindow):
             self.commit(toast="Check-in saved — forecast updated", undoable=True)
 
     def add_item(self, kind: str):
-        dlg = ItemDialog(self.data, kind=kind, parent=self)
+        dlg = ItemDialog(self.data, kind=kind, parent=self, today=self.today)
         if dlg.exec():
+            self.snapshot()
             self.data.items.append(dlg.result_item)
-            self.commit(toast=f"Added “{dlg.result_item.name}”")
+            self.commit(toast=f"Added “{dlg.result_item.name}”", undoable=True)
 
     def edit_item(self, item_id: str):
         item = self.data.item(item_id)
         if not item:
             return
-        dlg = ItemDialog(self.data, item=item, parent=self)
+        dlg = ItemDialog(self.data, item=item, parent=self, today=self.today)
         if dlg.exec():
             self.snapshot()
             self.data.items[self.data.items.index(item)] = dlg.result_item
             self.commit(toast="Saved", undoable=True)
 
     def duplicate_item(self, item_id: str):
+        """Open a copy in the editor; nothing is added unless it's saved."""
         item = self.data.item(item_id)
+        if not item:
+            return
         clone = copy.deepcopy(item)
         clone.id = new_id()
+        clone.updated = ""
         clone.name = f"{item.name} (copy)"
-        self.data.items.append(clone)
-        self.commit()
-        self.edit_item(clone.id)
+        dlg = ItemDialog(self.data, item=clone, parent=self, today=self.today, title="Duplicate entry",
+                         ok_text="Add copy")
+        if dlg.exec():
+            self.snapshot()
+            self.data.items.append(dlg.result_item)
+            self.commit(toast=f"Added “{dlg.result_item.name}”", undoable=True)
+
+    def change_amount_from(self, item_id: str, when: date | None = None):
+        """New amount from a date on (rent going up), keeping earlier dates as they were."""
+        item = self.data.item(item_id)
+        if not item:
+            return
+        dlg = ChangeAmountDialog(item, self.today, when, self)
+        if not dlg.exec():
+            return
+        head, tail = change_amount_from(item, dlg.result_when, dlg.result_amount)
+        if head.to_dict() == item.to_dict() and tail is None:
+            self.toast("Nothing is scheduled on or after that date")
+            return
+        self.snapshot()
+        self.data.items[self.data.items.index(item)] = head
+        if tail is not None:
+            self.data.items.append(tail)
+        self.commit(toast=f"“{item.name}” is {money.fmt(dlg.result_amount)} from {month_day(dlg.result_when)} on",
+                    undoable=True)
 
     def toggle_item(self, item_id: str):
         item = self.data.item(item_id)
+        self.snapshot()
         item.active = not item.active
-        self.commit(toast=f"“{item.name}” {'resumed' if item.active else 'paused'}")
+        self.commit(toast=f"“{item.name}” {'resumed' if item.active else 'paused'}", undoable=True)
 
     def delete_item(self, item_id: str):
         item = self.data.item(item_id)
@@ -354,15 +441,17 @@ class MainWindow(QMainWindow):
         self.data.items.remove(item)
         self.commit(toast=f"Deleted “{item.name}”", undoable=True)
 
-    def set_override(self, item, key: str, cents):
+    def set_override(self, item: RecurringItem, key: str, cents: int | None):
+        """Skip one occurrence (cents=None) or change its amount, without touching the schedule."""
         self.snapshot()
         item.overrides[key] = cents
         self.commit(toast="Skipped this occurrence" if cents is None else "Amount changed for this date",
                     undoable=True)
 
-    def clear_override(self, item, key: str):
+    def clear_override(self, item: RecurringItem, key: str):
+        self.snapshot()
         item.overrides.pop(key, None)
-        self.commit(toast="Restored")
+        self.commit(toast="Restored the normal amount", undoable=True)
 
     def afford(self):
         if not self.data.has_start:
@@ -370,20 +459,18 @@ class MainWindow(QMainWindow):
             return
         dlg = AffordDialog(self.data, self.build_forecast, self.today, self)
         if dlg.exec():
+            self.snapshot()
             self.data.items.append(dlg.result_item)
-            self.commit(toast=f"Added “{dlg.result_item.name}” as a one-time bill")
+            self.commit(toast=f"Added “{dlg.result_item.name}” as a one-time bill", undoable=True)
 
     def reminders(self):
         """Menu: email/phone reminders or calendar export."""
-        from PySide6.QtGui import QCursor
-        from PySide6.QtWidgets import QMenu
         m = QMenu(self)
         m.addAction("✉  Email && phone reminders…", self.notify_settings)
         m.addAction("📅  Export to my calendar…", self.calendar_export)
         m.exec(QCursor.pos())
 
     def notify_settings(self):
-        from .. import notify
         dlg = NotifyDialog(self.data, self.store.folder, self)
         if not dlg.exec():
             return
@@ -393,46 +480,41 @@ class MainWindow(QMainWindow):
             if dlg.want_task:
                 notify.install_task(s.notify_time)
                 s.notify_task = True
-                msg = f"Reminders on — you'll get them daily around {_ampm(s.notify_time)}"
+                msg = f"Reminders on — you'll get them daily around {ampm(s.notify_time)}"
             elif s.notify_task:
                 notify.remove_task()
                 s.notify_task = False
         except OSError as e:
+            log.warning("Couldn't set up the reminder task: %s", e)
             s.notify_task = False
             QMessageBox.warning(self, "Background reminders",
-                                f"Reminders will be sent while Balance Tracker is open, but the background "
+                                "Reminders will be sent while Balance Tracker is open, but the background "
                                 f"task couldn't be set up:\n{e}")
         self.commit(toast=msg)
         self.maybe_send_digest()
 
     def maybe_send_digest(self):
         """Send today's digest from the app if it's due (the scheduled task may not have run yet)."""
-        import copy
-        import threading
-
-        from .. import notify
-        if getattr(self, "_sending", False) or getattr(self, "_failed_day", None) == self.today \
-                or not notify.due_now(self.data):
+        if self._sending or self._failed_day == self.today or not notify.due_now(self.data):
             return
         self._sending = True
-        snapshot = copy.deepcopy(self.data)
-        today = self.today
-        folder = self.store.folder
+        snapshot, today, folder = copy.deepcopy(self.data), self.today, self.store.folder
 
-        def work():
+        def work() -> list:
             digest = notify.compose(snapshot, today)
             errors = notify.deliver(snapshot, folder, digest) if digest else []
-            notify._log(folder, "app: " + ("; ".join(errors) or ("sent" if digest else "nothing to send")))
-            self._sender.done.emit(today.isoformat(), errors)
-        threading.Thread(target=work, daemon=True).start()
+            notify.log_activity(folder, "app: " + ("; ".join(errors) or ("sent" if digest else "nothing to send")))
+            return errors
 
-    def _digest_done(self, day: str, errors: list):
+        run_in_background(self, work, lambda errors, crash: self._digest_done(today, [str(crash)] if crash else errors))
+
+    def _digest_done(self, day: date, errors: list):
         self._sending = False
         if errors:
-            self._failed_day = date.fromisoformat(day)  # don't retry every minute
+            self._failed_day = day
             self.toast("Couldn't send today's reminder — check Email & phone reminders")
             return
-        self.data.settings.notify_last_sent = day
+        self.data.settings.notify_last_sent = day.isoformat()
         self.commit()
 
     def calendar_export(self):
@@ -446,16 +528,17 @@ class MainWindow(QMainWindow):
         self.commit(toast="Marked as paid", undoable=True)
 
     def add_debt(self):
-        dlg = DebtDialog(self.data, parent=self)
+        dlg = DebtDialog(self.data, parent=self, today=self.today)
         if dlg.exec():
+            self.snapshot()
             self.data.debts.append(dlg.result_debt)
-            self.commit(toast=f"Added “{dlg.result_debt.name}”")
+            self.commit(toast=f"Added “{dlg.result_debt.name}”", undoable=True)
 
     def edit_debt(self, debt_id: str):
         debt = self.data.debt(debt_id)
         if not debt:
             return
-        dlg = DebtDialog(self.data, debt, parent=self)
+        dlg = DebtDialog(self.data, debt, parent=self, today=self.today)
         if dlg.exec():
             self.snapshot()
             self.data.debts[self.data.debts.index(debt)] = dlg.result_debt
@@ -471,7 +554,7 @@ class MainWindow(QMainWindow):
         self.commit(toast=f"Deleted “{debt.name}”", undoable=True)
 
     def delete_checkpoint(self, cp_id: str):
-        cp = next((c for c in self.data.checkpoints if c.id == cp_id), None)
+        cp = self.data.checkpoint(cp_id)
         if not cp or cp is self.data.start:
             return
         self.snapshot()
@@ -518,14 +601,11 @@ class MainWindow(QMainWindow):
         msg.addButton(QMessageBox.Cancel)
         msg.exec()
         clicked = msg.clickedButton()
-        if clicked not in (replace, merge) or clicked is None:
+        if clicked is None or clicked not in (replace, merge):
             return
         self.store.safety_backup(self.data)
         self.snapshot()
-        if clicked is replace:
-            self.data = incoming
-        else:
-            self.data = storage.merge_data(self.data, incoming)
+        self.data = incoming if clicked is replace else storage.merge_data(self.data, incoming)
         self.commit(theme_changed=True, toast="Backup restored", undoable=True)
 
     def reset_all(self):
@@ -534,9 +614,9 @@ class MainWindow(QMainWindow):
                 != QMessageBox.Yes:
             return
         self.store.safety_backup(self.data)
-        settings = self.data.settings
-        self.data = AppData(settings=settings)
-        self.commit(toast="All data erased (a safety backup was saved)")
+        self.snapshot()
+        self.data = AppData(settings=self.data.settings)
+        self.commit(toast="All data erased (a safety backup was saved)", undoable=True)
         self.first_run()
 
     # ---- startup -------------------------------------------------------
@@ -549,70 +629,50 @@ class MainWindow(QMainWindow):
             self.check_in()
 
     # ---- iPhone sync ---------------------------------------------------
-    def sync_folder(self):
-        from pathlib import Path
+    def sync_folder(self) -> Path | None:
         s = self.data.settings
         return Path(s.sync_folder) if s.sync_enabled and s.sync_folder else None
 
     def _write_sync(self):
-        from .. import sync
         folder = self.sync_folder()
         if folder is None:
             return
         try:
             sync.write_sync_file(folder, self.data)
             self._sync_seen = self._sync_mtimes(folder)
-            self._sync_error = ""
+            self.sync_error = ""
         except OSError as e:
-            self._sync_error = str(e)
+            log.warning("Couldn't write the sync file: %s", e)
+            self.sync_error = str(e)
 
     @staticmethod
-    def _sync_mtimes(folder) -> dict:
-        from .. import sync
+    def _sync_mtimes(folder: Path) -> dict[str, float]:
         out = {}
         for p in sync.sync_files(folder):
-            try:
+            with contextlib.suppress(OSError):  # vanished between listing and stat; the next tick sees it
                 out[str(p)] = p.stat().st_mtime
-            except OSError:
-                pass
         return out
 
     def sync_in(self, force: bool = False) -> int:
         """Merge changes the iPhone saved into the sync folder. Returns 1 if anything changed."""
-        import shutil
-        from datetime import datetime as _dt
-
-        from .. import storage, sync
         folder = self.sync_folder()
         if folder is None:
             return 0
         mtimes = self._sync_mtimes(folder)
-        if not force and mtimes == getattr(self, "_sync_seen", None):
+        if not force and mtimes == self._sync_seen:
             return 0
-        merged = self.data
-        extras = []
-        for p in sync.sync_files(folder):
-            try:
-                merged = sync.merge(merged, storage.read_backup(p))
-            except (OSError, ValueError, KeyError, TypeError):
-                continue  # half-downloaded or not ours; try again next time
-            if p.name != sync.SYNC_FILE:
-                extras.append(p)
+        result = sync.pull_folder(folder, self.data)
         self._sync_seen = mtimes
-        self._last_sync = _dt.now()
-        changed = not sync.same(merged, self.data)
-        if changed:
-            self.data = merged
+        if result.changed:
+            self.data = result.data
+            # Undoing to before the merge would delete whatever the phone added, on both devices.
+            self._undo_stack.clear()
             self.commit(toast="📱 Synced changes from your iPhone", restamp=False)
-        for p in extras:  # copies like "BalanceTracker-sync 2.json" are merged; tidy them away
-            try:
-                self.store.backup_dir.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(p), str(self.store.backup_dir / f"merged-{_dt.now():%Y%m%d-%H%M%S}-{p.name}"))
-            except OSError:
-                pass
-        if extras and not changed:
+        for p in result.copies:  # copies like "BalanceTracker-sync 2.json" are merged; tidy them away
+            self.store.archive_sync_copy(p)
+        if result.copies and not result.changed:
             self._write_sync()
-        return int(changed)
+        return int(result.changed)
 
     def enable_sync(self, folder: str | None):
         s = self.data.settings
@@ -626,7 +686,6 @@ class MainWindow(QMainWindow):
             self.toast("iPhone sync is on — open the phone app and tap Sync")
 
     def changeEvent(self, e):
-        from PySide6.QtCore import QEvent
         super().changeEvent(e)
         if e.type() == QEvent.ActivationChange and self.isActiveWindow() and hasattr(self, "pages"):
             QTimer.singleShot(300, self.sync_in)
@@ -634,10 +693,4 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, e):
         super().resizeEvent(e)
         if self.toast_w.isVisible():
-            self.toast_w.move((self.width() - self.toast_w.width()) // 2 + 110,
-                              self.height() - self.toast_w.height() - 28)
-
-
-def _ampm(hhmm: str) -> str:
-    h, m = (int(x) for x in hhmm.split(":"))
-    return f"{(h % 12) or 12}:{m:02d} {'AM' if h < 12 else 'PM'}"
+            self.toast_w.place()
