@@ -34,7 +34,7 @@ jobs:
       - name: Check the engine loads
         run: node -e "import('./web/engine.js').then(E => { if (!E.makePlan) process.exit(1) })"
       - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: web
       - id: deployment
