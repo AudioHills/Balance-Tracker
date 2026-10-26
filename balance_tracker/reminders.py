@@ -69,7 +69,8 @@ def collect(data: AppData, plan, today: date, months: int = 6, card_charges: boo
 
 
 def _esc(text: str) -> str:
-    return text.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
+    # A lone carriage return could start a new line in some calendar apps, so drop it
+    return text.replace("\r", "").replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
 
 
 def _fold(line: str) -> str:

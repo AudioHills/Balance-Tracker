@@ -6,7 +6,16 @@ from datetime import date, timedelta
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor
-from PySide6.QtWidgets import QAbstractItemView, QCheckBox, QFileDialog, QInputDialog, QLineEdit, QMenu, QPushButton
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QCheckBox,
+    QFileDialog,
+    QInputDialog,
+    QLabel,
+    QLineEdit,
+    QMenu,
+    QPushButton,
+)
 
 from ... import money, storage
 from ...forecast import CHECKIN, START, Entry, add_months
@@ -172,10 +181,17 @@ class LedgerPage(Page):
         m.exec(self.table.viewport().mapToGlobal(pos))
 
     def change_once(self, item, key: str, e: Entry):
-        val, ok = QInputDialog.getDouble(self.widget, "Change amount", f"{item.name} on {full_date(e.date)}:",
-                                         abs(e.amount) / 100, 0, 99_999_999, 2)
-        if ok:
-            self.ctx.set_override(item, key, money.to_cents(val))
+        dlg = QInputDialog(self.widget)
+        dlg.setWindowTitle("Change amount")
+        dlg.setInputMode(QInputDialog.DoubleInput)
+        dlg.setDoubleRange(0, 99_999_999)
+        dlg.setDoubleDecimals(2)
+        dlg.setDoubleValue(abs(e.amount) / 100)
+        dlg.setLabelText(f"{item.name} on {full_date(e.date)}:")
+        for lb in dlg.findChildren(QLabel):  # the name is data: never render it as markup
+            lb.setTextFormat(Qt.PlainText)
+        if dlg.exec():
+            self.ctx.set_override(item, key, money.to_cents(dlg.doubleValue()))
 
     def export_csv(self):
         path, _ = QFileDialog.getSaveFileName(self.widget, "Export day-by-day ledger",

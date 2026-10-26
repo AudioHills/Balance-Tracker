@@ -4,6 +4,8 @@ from __future__ import annotations
 import contextlib
 import copy
 import logging
+import sys
+import time
 from datetime import date
 from pathlib import Path
 
@@ -25,22 +27,28 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import money, notify, storage, sync
+from .. import applock, money, notify, secure_store, storage, sync
 from ..debts import Plan, full_forecast, make_plan
+from ..encryption import FileKey
 from ..forecast import Forecast, change_amount_from, projection_end
 from ..formatting import ampm, month_day
 from ..models import BILL, INCOME, AppData, Checkpoint, RecurringItem, new_id
 from . import theme
 from .dialogs import (
     AffordDialog,
+    BackupPasswordDialog,
     ChangeAmountDialog,
     CheckInDialog,
     DebtDialog,
     ItemDialog,
+    LockScreen,
+    LockSetupDialog,
     NotifyDialog,
     RemindersDialog,
     ShortcutsDialog,
+    SyncPassphraseDialog,
     WelcomeDialog,
+    ask_password,
 )
 from .icon import app_icon
 from .pages import CheckinsPage, DashboardPage, DebtsPage, ItemsPage, LedgerPage, Page, SettingsPage
@@ -51,7 +59,23 @@ log = logging.getLogger(__name__)
 
 SIDEBAR_WIDTH = 230
 UNDO_LEVELS = 25
-LEDGER, ITEMS = 1, 2  # page indexes used by actions
+LEDGER, ITEMS, SETTINGS = 1, 2, 5  # page indexes used by actions
+SYNC_KEY = "sync_key"  # name of the sync-file key in secrets.json
+
+
+def system_idle_seconds() -> float | None:
+    """Seconds since the last keyboard/mouse input anywhere on Windows, or None elsewhere."""
+    if sys.platform != "win32":
+        return None
+    import ctypes
+
+    class LastInput(ctypes.Structure):
+        _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+    info = LastInput(ctypes.sizeof(LastInput), 0)
+    if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+        return None
+    return ((ctypes.windll.kernel32.GetTickCount() - info.dwTime) & 0xFFFFFFFF) / 1000
 
 
 class Toast(QFrame):
@@ -63,6 +87,7 @@ class Toast(QFrame):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(16, 10, 10, 10)
         self.text = QLabel()
+        self.text.setTextFormat(Qt.PlainText)  # messages include names from the data
         self.text.setStyleSheet("font-weight: 600;")
         self.undo = QPushButton("Undo")
         self.undo.setObjectName("Chip")
@@ -118,6 +143,12 @@ class MainWindow(QMainWindow):
         self.today = today or date.today()
         self.plan: Plan | None = None
         self.sync_error = ""  # last problem writing the iPhone sync file, shown in Settings
+        self.sync_refused: list[str] = []  # sync-folder files that were refused (wrong passphrase…)
+        self.sync_key = self._load_sync_key()
+        self._locked = False
+        self._last_input = time.monotonic()  # for the idle lock where Windows' own idle time isn't available
+        self._watching_input = False
+        self.lock_cfg = applock.load(store.folder)
         self._ledger_end: date | None = None
         self._undo_stack: list[dict] = []
         self._sending = False  # a reminder digest is being sent
@@ -149,6 +180,9 @@ class MainWindow(QMainWindow):
         # Once a minute: send a due reminder, pick up iPhone edits, roll "today" over at midnight.
         self.clock = QTimer(self, interval=60_000, timeout=self._tick)
         self.clock.start()
+        self.idle_timer = QTimer(self, interval=15_000, timeout=self._check_idle)
+        self.idle_timer.start()
+        self._update_idle_watch()
         for p in self.pages:  # every page starts complete; afterwards they refresh when shown
             p.refresh()
             p.dirty = False
@@ -225,6 +259,7 @@ class MainWindow(QMainWindow):
             ("Ctrl+F", "Search Day by day or Income & Bills", self.focus_search),
             ("Ctrl+Z", "Undo the last change", self.undo),
             ("Ctrl+T", "Switch between light and dark", self.toggle_theme),
+            ("Ctrl+L", "Lock Balance Tracker (once a password is set)", self.lock_now),
             ("F1", "Show these shortcuts", self.show_shortcuts),
         ]
         for i in range(len(self.NAV)):
@@ -341,8 +376,14 @@ class MainWindow(QMainWindow):
             self.toast("Nothing to undo")
             return
         old_theme = self.data.settings.theme
-        self.data = AppData.from_dict(self._undo_stack.pop())
+        self.data = self._keep_security(AppData.from_dict(self._undo_stack.pop()))
         self.commit(theme_changed=self.data.settings.theme != old_theme, toast="Undone")
+
+    def _keep_security(self, new: AppData) -> AppData:
+        """Undo and restoring a backup bring back old data, but never switch sync encryption off (or on):
+        that only changes through Settings."""
+        new.settings.sync_encrypt = self.data.settings.sync_encrypt
+        return new
 
     def _tick(self):
         self.maybe_send_digest()
@@ -572,12 +613,19 @@ class MainWindow(QMainWindow):
 
     # ---- backup / restore ----------------------------------------------
     def export_backup(self):
+        dlg = BackupPasswordDialog(self)
+        if not dlg.exec():
+            return
         path, _ = QFileDialog.getSaveFileName(self, "Export backup",
                                               f"BalanceTracker-backup-{self.today.isoformat()}.json",
                                               "Balance Tracker backup (*.json)")
         if path:
-            storage.export_backup(self.data, path)
-            self.toast("Backup exported")
+            try:
+                storage.export_backup(self.data, path, dlg.result_password)
+            except OSError as e:
+                QMessageBox.warning(self, "Couldn't export", f"The backup couldn't be saved:\n{e}")
+                return
+            self.toast("Backup exported 🔒 — keep the password safe" if dlg.result_password else "Backup exported")
 
     def import_backup(self):
         path, _ = QFileDialog.getOpenFileName(self, "Import backup", "", "Balance Tracker backup (*.json)")
@@ -585,8 +633,13 @@ class MainWindow(QMainWindow):
             self.restore_from(path, ask_merge=True)
 
     def restore_from(self, path: str, ask_merge: bool = False):
+        def ask(problem: str) -> str | None:
+            return ask_password(self, "Password-protected backup", "Enter the password for this backup:", problem)
+
         try:
-            incoming = storage.read_backup(path)
+            incoming = storage.read_backup(path, ask, keys=[self.sync_key])
+        except storage.ImportCancelled:
+            return
         except (OSError, ValueError, KeyError, TypeError) as e:
             QMessageBox.warning(self, "Can't import", f"That file couldn't be read:\n{e}")
             return
@@ -605,7 +658,7 @@ class MainWindow(QMainWindow):
             return
         self.store.safety_backup(self.data)
         self.snapshot()
-        self.data = incoming if clicked is replace else storage.merge_data(self.data, incoming)
+        self.data = self._keep_security(incoming) if clicked is replace else storage.merge_data(self.data, incoming)
         self.commit(theme_changed=True, toast="Backup restored", undoable=True)
 
     def reset_all(self):
@@ -633,12 +686,24 @@ class MainWindow(QMainWindow):
         s = self.data.settings
         return Path(s.sync_folder) if s.sync_enabled and s.sync_folder else None
 
+    def _load_sync_key(self) -> FileKey | None:
+        raw = secure_store.get_json(self.store.folder, SYNC_KEY)
+        try:
+            return FileKey.from_dict(raw) if raw else None
+        except (KeyError, TypeError, ValueError):
+            return None
+
     def _write_sync(self):
         folder = self.sync_folder()
         if folder is None:
             return
+        encrypt = self.data.settings.sync_encrypt
+        if encrypt and self.sync_key is None:  # never fall back to writing it unencrypted
+            self.sync_error = ("The sync passphrase isn't stored on this PC any more. Set it again with "
+                               "“Change passphrase…” below.")
+            return
         try:
-            sync.write_sync_file(folder, self.data)
+            sync.write_sync_file(folder, self.data, self.sync_key if encrypt else None)
             self._sync_seen = self._sync_mtimes(folder)
             self.sync_error = ""
         except OSError as e:
@@ -661,8 +726,10 @@ class MainWindow(QMainWindow):
         mtimes = self._sync_mtimes(folder)
         if not force and mtimes == self._sync_seen:
             return 0
-        result = sync.pull_folder(folder, self.data)
+        encrypt = self.data.settings.sync_encrypt
+        result = sync.pull_folder(folder, self.data, self.sync_key if encrypt else None, require_encrypted=encrypt)
         self._sync_seen = mtimes
+        self._sync_refused(result.problems)
         if result.changed:
             self.data = result.data
             # Undoing to before the merge would delete whatever the phone added, on both devices.
@@ -673,6 +740,139 @@ class MainWindow(QMainWindow):
         if result.copies and not result.changed:
             self._write_sync()
         return int(result.changed)
+
+    def _sync_refused(self, problems: list[str]):
+        """Report files in the sync folder that weren't merged (once each, then in Settings)."""
+        new = [p for p in problems if p not in self.sync_refused]
+        self.sync_refused = problems
+        if new:
+            self.toast("📱 " + new[0])
+        if new or not problems:
+            self.pages[SETTINGS].dirty = True
+            if self.stack.currentIndex() == SETTINGS:
+                self._refresh_page(SETTINGS)
+
+    def set_sync_passphrase(self):
+        dlg = SyncPassphraseDialog(self)
+        if not dlg.exec():
+            return
+        passphrase = dlg.result_passphrase
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        run_in_background(self, lambda: FileKey.derive(passphrase), self._sync_key_ready)
+
+    def _sync_key_ready(self, key: FileKey | None, error: Exception | None):
+        QApplication.restoreOverrideCursor()
+        try:
+            if error is not None:
+                raise OSError(str(error))
+            secure_store.put_json(self.store.folder, SYNC_KEY, key.to_dict())
+        except OSError as e:
+            QMessageBox.warning(self, "Couldn't save the passphrase", str(e))
+            return
+        self.sync_key = key
+        self.data.settings.sync_encrypt = True
+        self.sync_refused = []
+        self.commit(toast="🔒 Sync file encrypted — on your iPhone, choose the sync file again and enter "
+                          "the passphrase")
+
+    def turn_off_sync_encryption(self):
+        if QMessageBox.question(self, "Stop encrypting the sync file?",
+                                "Your finances will be stored in iCloud Drive without a passphrase, readable by "
+                                "anyone who can open that folder. Continue?") != QMessageBox.Yes:
+            return
+        try:
+            secure_store.put_json(self.store.folder, SYNC_KEY, None)
+        except OSError as e:
+            QMessageBox.warning(self, "Couldn't remove the passphrase", str(e))
+            return
+        self.sync_key = None
+        self.data.settings.sync_encrypt = False
+        self.sync_refused = []
+        self.commit(toast="The sync file is no longer encrypted")
+
+    # ---- app lock ------------------------------------------------------
+    def lock_settings(self):
+        cfg = applock.load(self.store.folder)
+        if LockSetupDialog(self.store.folder, cfg, self).exec():
+            self._lock_changed()
+            self.toast("🔒 Lock updated" if cfg else "🔒 Balance Tracker will ask for your password when it opens")
+
+    def _lock_changed(self):
+        self.lock_cfg = applock.load(self.store.folder)
+        self._update_idle_watch()
+        self.refresh_all()
+
+    def _update_idle_watch(self):
+        """Where Windows can't say how long the user has been away, watch this app's own input
+        events, but only while an idle lock is set (an app-wide event filter isn't free)."""
+        cfg = self.lock_cfg
+        want = bool(cfg and cfg.idle_minutes) and system_idle_seconds() is None
+        if want != self._watching_input:
+            app = QApplication.instance()
+            if want:
+                app.installEventFilter(self)
+            else:
+                app.removeEventFilter(self)
+            self._watching_input = want
+
+    def remove_lock(self):
+        if applock.load(self.store.folder) is None:
+            return
+        pw = ask_password(self, "Turn off the lock", "Enter your password to turn off the lock:")
+        while pw is not None:
+            if applock.check(self.store.folder, pw):
+                applock.remove(self.store.folder)
+                self._lock_changed()
+                self.toast("Lock turned off")
+                return
+            wait = applock.load(self.store.folder).wait_seconds()
+            problem = f"Too many wrong passwords — wait {wait} s." if wait else "That password isn't right."
+            pw = ask_password(self, "Turn off the lock", "Enter your password to turn off the lock:", problem)
+
+    def eventFilter(self, obj, event):
+        if event.type() in (QEvent.KeyPress, QEvent.MouseButtonPress, QEvent.Wheel):
+            self._last_input = time.monotonic()
+        return False
+
+    def _check_idle(self):
+        cfg = self.lock_cfg
+        if self._locked or cfg is None or not cfg.idle_minutes:
+            return
+        idle = system_idle_seconds()
+        if idle is None:
+            idle = time.monotonic() - self._last_input
+        if idle >= cfg.idle_minutes * 60:
+            self.lock_now(auto=True)
+
+    def lock_now(self, auto: bool = False, minimized: bool = False):
+        """Hide everything behind the lock screen. Open dialogs are closed (as if cancelled)."""
+        if self._locked:
+            return
+        self.lock_cfg = applock.load(self.store.folder)
+        if self.lock_cfg is None:
+            if not auto:
+                self.toast("Set a lock password first: Settings → Security")
+            return
+        self._locked = True
+        try:
+            for w in QApplication.topLevelWidgets():
+                if w is not self and w.isVisible():
+                    w.hide()
+            self.toast_w.hide()
+            maximized = self.isMaximized()
+            self.hide()
+            screen = LockScreen(self.store.folder)
+            if minimized:
+                screen.setWindowState(Qt.WindowMinimized)
+            if not screen.exec():
+                QApplication.quit()
+                return
+            self.showMaximized() if maximized else self.showNormal()
+            self.raise_()
+            self.activateWindow()
+        finally:
+            self._locked = False
+            self._last_input = time.monotonic()
 
     def enable_sync(self, folder: str | None):
         s = self.data.settings
@@ -689,6 +889,11 @@ class MainWindow(QMainWindow):
         super().changeEvent(e)
         if e.type() == QEvent.ActivationChange and self.isActiveWindow() and hasattr(self, "pages"):
             QTimer.singleShot(300, self.sync_in)
+        if e.type() == QEvent.WindowStateChange and self.isMinimized() and hasattr(self, "pages") \
+                and not self._locked:
+            cfg = self.lock_cfg
+            if cfg and cfg.lock_on_minimize:
+                QTimer.singleShot(0, lambda: self.lock_now(auto=True, minimized=True))
 
     def resizeEvent(self, e):
         super().resizeEvent(e)

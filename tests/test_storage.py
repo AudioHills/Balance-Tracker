@@ -117,8 +117,18 @@ def test_latest_release_reads_the_github_reply():
         return Reply({"tag_name": "v2.1.0", "html_url": "https://example.com/r", "name": "Balance Tracker 2.1.0"})
 
     r = updates.latest_release(opener=opener)
-    assert (r.version, r.url) == ("2.1.0", "https://example.com/r")
+    # A link anywhere but this repository's releases is never offered: the plain releases page is
+    assert (r.version, r.url) == ("2.1.0", updates.RELEASES_URL)
     assert seen["url"] == updates.API_URL and seen["agent"].startswith("BalanceTracker/")
+
+
+def test_release_links_must_point_at_this_repo():
+    good = f"https://github.com/{updates.REPO}/releases/tag/v2.1.0"
+    assert updates.safe_release_url(good) == good
+    for bad in ("https://github.com.evil.example/x", f"http://github.com/{updates.REPO}/releases/tag/v2",
+                "javascript:alert(1)", f"https://github.com/{updates.REPO}/releases/tag/v2'><a href=x>",
+                "https://github.com/someone-else/Balance-Tracker/releases/tag/v9", None):
+        assert updates.safe_release_url(bad) == updates.RELEASES_URL
 
 
 def test_malformed_backup_names_are_ignored(tmp_path):

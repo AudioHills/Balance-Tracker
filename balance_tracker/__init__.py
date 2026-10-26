@@ -1,5 +1,5 @@
 """Balance Tracker — a day-by-day chequing account forecaster."""
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 # GitHub repository the .exe is released from ("owner/name"), used by "Check for updates".
 REPO = "AudioHills/Balance-Tracker"

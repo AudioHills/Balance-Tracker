@@ -254,6 +254,7 @@ class Settings:
     # iPhone sync through iCloud Drive
     sync_enabled: bool = False
     sync_folder: str = ""
+    sync_encrypt: bool = False  # the sync file is encrypted with a passphrase (key in secrets.json)
     hide_balance: bool = False  # eye toggle: show today's balance as ******
     account_name: str = "Chequing"
     # Debt payoff plan
@@ -297,8 +298,17 @@ class Settings:
         self.notify_days_before = max(0, min(7, self.notify_days_before))
         self.low_balance_threshold = max(0, self.low_balance_threshold)
         self.debt_fixed_extra = max(0, self.debt_fixed_extra)
-        self.currency_symbol = self.currency_symbol.strip()[:4] or defaults.currency_symbol
+        self.currency_symbol = clean_symbol(self.currency_symbol)
         self.account_name = self.account_name.strip() or defaults.account_name
+
+
+_UNSAFE_SYMBOL_CHARS = re.compile(r"[<>&\"'`\\]")
+
+
+def clean_symbol(text: str) -> str:
+    """A currency symbol safe to show anywhere (the iPhone app puts it inside HTML): at most four
+    characters, none of them HTML/markup characters. Mirrors cleanSymbol() in web/engine.js."""
+    return _UNSAFE_SYMBOL_CHARS.sub("", str(text)).strip()[:4] or "$"
 
 
 def _coerce(value, kind: type):

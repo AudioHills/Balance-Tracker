@@ -3,6 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <!-- Only this site's own files may run or load; nothing can be sent anywhere else. GitHub Pages can't
+       set response headers, so the policy lives here. Inline style attributes are used for layout. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; manifest-src 'self'; worker-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'; frame-src 'none'">
+  <meta name="referrer" content="no-referrer">
   <title>Balance Tracker</title>
   <meta name="description" content="Day-by-day chequing forecast, bills, debts and check-ins.">
   <meta name="theme-color" content="#F3F5FA" media="(prefers-color-scheme: light)">

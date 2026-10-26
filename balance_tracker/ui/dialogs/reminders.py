@@ -69,7 +69,7 @@ class RemindersDialog(BaseDialog):
 
     @staticmethod
     def _howto(html: str):
-        lb = label(html, "Hint", wrap=True)
+        lb = label(html, "Hint", wrap=True, rich=True)
         lb.setMinimumHeight(lb.heightForWidth(572) + 8)
         return lb
 

@@ -7,9 +7,11 @@ from .debt import DebtDialog
 from .item import ChangeAmountDialog, ItemDialog
 from .notify import NotifyDialog
 from .reminders import RemindersDialog
+from .security import BackupPasswordDialog, LockScreen, LockSetupDialog, SyncPassphraseDialog, ask_password
 from .shortcuts import ShortcutsDialog
 
 __all__ = [
-    "AffordDialog", "BaseDialog", "ChangeAmountDialog", "CheckInDialog", "DebtDialog", "ItemDialog", "NotifyDialog",
-    "RemindersDialog", "ShortcutsDialog", "WelcomeDialog", "date_edit", "from_qdate", "to_qdate",
+    "AffordDialog", "BackupPasswordDialog", "BaseDialog", "ChangeAmountDialog", "CheckInDialog", "DebtDialog",
+    "ItemDialog", "LockScreen", "LockSetupDialog", "NotifyDialog", "RemindersDialog", "ShortcutsDialog",
+    "SyncPassphraseDialog", "WelcomeDialog", "ask_password", "date_edit", "from_qdate", "to_qdate",
 ]

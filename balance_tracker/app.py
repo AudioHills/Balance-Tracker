@@ -9,9 +9,10 @@ from PySide6.QtCore import QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from . import __version__, logs, storage
+from . import __version__, applock, logs, storage
 from .models import AppData
 from .ui import theme
+from .ui.dialogs import LockScreen
 from .ui.icon import app_icon
 from .ui.main_window import MainWindow
 
@@ -86,6 +87,8 @@ def main() -> int:
     _install_error_handler(store)
     data = _load(store)
     theme.apply_theme(app, data.settings.theme)
+    if applock.load(store.folder) is not None and not LockScreen(store.folder).exec():
+        return 0
     win = MainWindow(store, data)
     win.show()
     QTimer.singleShot(250, win.startup_prompt)

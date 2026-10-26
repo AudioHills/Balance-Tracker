@@ -28,8 +28,11 @@ MASK = "******"  # shown instead of a balance while it's hidden
 # --------------------------------------------------------------------------
 # Layout helpers
 # --------------------------------------------------------------------------
-def label(text: str = "", obj: str | None = None, wrap: bool = False) -> QLabel:
+def label(text: str = "", obj: str | None = None, wrap: bool = False, rich: bool = False) -> QLabel:
+    """A QLabel. Plain text unless `rich`: names and notes can come from a sync or backup file, and Qt
+    would otherwise render markup in them (including clickable links)."""
     lb = QLabel(text)
+    lb.setTextFormat(Qt.RichText if rich else Qt.PlainText)
     if obj:
         lb.setObjectName(obj)
     lb.setWordWrap(wrap)

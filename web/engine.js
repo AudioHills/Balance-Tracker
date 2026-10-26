@@ -73,43 +73,95 @@ const DEFAULT_SETTINGS = {
   theme: "system", currency_symbol: "$", low_balance_threshold: 10000, forecast_months: 6, prompt_on_open: true,
   account_name: "Chequing", debt_strategy: "avalanche", debt_mode: "auto", debt_fixed_extra: 0, debt_in_forecast: false,
 };
+const THEMES = ["system", "light", "dark"];
+
+// ---------------------------------------------------------------- validation
+// Everything read from storage, a sync file or a backup goes through normData(), so a damaged or
+// hostile file can't put unexpected types, markup or impossible dates into the app. Mirrors models.py.
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+/** A strict YYYY-MM-DD calendar date. Throws for anything else (like Python's date.fromisoformat). */
+export function isoDate(v) {
+  if (typeof v !== "string" || !ISO_DATE.test(v) || Number(v.slice(0, 4)) < 1000 || toISO(toDay(v)) !== v) {
+    throw new Error(`Not a date: ${JSON.stringify(String(v).slice(0, 40))}`);
+  }
+  return v;
+}
+const optDate = (v, fallback) => (v === null || v === undefined || v === "" ? fallback : isoDate(v));
+const int = (v, fallback = 0) => { const n = Math.trunc(Number(v)); return Number.isFinite(n) ? n : fallback; };
+const num = (v, fallback = 0) => { const n = Number(v); return Number.isFinite(n) ? n : fallback; };
+const plainMap = (obj) => Object.entries(obj && typeof obj === "object" && !Array.isArray(obj) ? obj : {})
+  .filter(([k]) => !UNSAFE_KEYS.has(k));
+/** Currency symbols are shown inside the page's markup: keep them short and free of HTML characters. */
+export const cleanSymbol = (s) => Array.from(String(s ?? "").replace(/[<>&"'`\\]/g, "").trim()).slice(0, 4).join("") || "$";
+function bool(v, fallback) {
+  if (typeof v === "boolean") return v;
+  if (typeof v === "number") return v !== 0;
+  if (typeof v === "string") {
+    const t = v.trim().toLowerCase();
+    if (["true", "yes", "1"].includes(t)) return true;
+    if (["false", "no", "0", ""].includes(t)) return false;
+  }
+  return fallback;
+}
+
+/** The settings both devices use, with every value checked and clamped like Settings._normalise(). */
+export function normSettings(raw) {
+  const d = raw && typeof raw === "object" ? raw : {};
+  const def = DEFAULT_SETTINGS;
+  const pick = (list, v, dflt) => (list.includes(v) ? v : dflt);
+  return {
+    theme: pick(THEMES, d.theme, def.theme),
+    currency_symbol: cleanSymbol(d.currency_symbol),
+    low_balance_threshold: Math.max(0, Math.round(num(d.low_balance_threshold, def.low_balance_threshold))),
+    forecast_months: Math.max(1, Math.min(36, Math.round(num(d.forecast_months, def.forecast_months)))),
+    prompt_on_open: bool(d.prompt_on_open, def.prompt_on_open),
+    account_name: String(d.account_name ?? "").trim() || def.account_name,
+    debt_strategy: pick(Object.keys(DEBT_STRATEGIES), d.debt_strategy, def.debt_strategy),
+    debt_mode: pick(["auto", "fixed"], d.debt_mode, def.debt_mode),
+    debt_fixed_extra: Math.max(0, Math.round(num(d.debt_fixed_extra, def.debt_fixed_extra))),
+    debt_in_forecast: bool(d.debt_in_forecast, def.debt_in_forecast),
+  };
+}
 
 export function normItem(d) {
   const freq = FREQUENCIES[d.frequency] ? d.frequency : "monthly";
   const overrides = {};
-  for (const [k, v] of Object.entries(d.overrides || {})) overrides[k] = v === null ? null : Math.trunc(Number(v));
+  for (const [k, v] of plainMap(d.overrides)) overrides[isoDate(k)] = v === null ? null : int(v);
   return {
-    name: String(d.name ?? ""), amount: Math.abs(Math.trunc(Number(d.amount) || 0)), kind: d.kind === "income" ? "income" : "bill",
-    frequency: freq, start_date: d.start_date || toISO(todayDay()), end_date: d.end_date || null,
-    second_day: Math.trunc(Number(d.second_day ?? 31)), weekend_rule: WEEKEND_RULES[d.weekend_rule] ? d.weekend_rule : "none",
+    name: String(d.name ?? ""), amount: Math.abs(int(d.amount)), kind: d.kind === "income" ? "income" : "bill",
+    frequency: freq, start_date: optDate(d.start_date, toISO(todayDay())), end_date: optDate(d.end_date, null),
+    second_day: Math.min(31, Math.max(1, int(d.second_day) || 31)), weekend_rule: WEEKEND_RULES[d.weekend_rule] ? d.weekend_rule : "none",
     category: String(d.category ?? ""), notes: String(d.notes ?? ""), active: d.active !== false, overrides,
     paid_with: String(d.paid_with || ""), updated: String(d.updated || ""), id: String(d.id || newId()),
   };
 }
 export function normDebt(d) {
   return {
-    name: String(d.name ?? ""), balance: Math.max(0, Math.trunc(Number(d.balance) || 0)), apr: Math.max(0, Number(d.apr) || 0),
-    kind: DEBT_KINDS[d.kind] ? d.kind : "credit_card", due_day: Math.min(31, Math.max(1, Math.trunc(Number(d.due_day) || 1))),
-    min_amount: Math.max(0, Math.trunc(Number(d.min_amount) || 0)), min_percent: Math.max(0, Number(d.min_percent) || 0),
-    min_plus_interest: d.min_plus_interest !== false, credit_limit: Math.max(0, Math.trunc(Number(d.credit_limit) || 0)),
-    linked_bill_id: String(d.linked_bill_id || ""), updated_on: d.updated_on || toISO(todayDay()), notes: String(d.notes ?? ""),
+    name: String(d.name ?? ""), balance: Math.max(0, int(d.balance)), apr: Math.max(0, num(d.apr)),
+    kind: DEBT_KINDS[d.kind] ? d.kind : "credit_card", due_day: Math.min(31, Math.max(1, int(d.due_day, 1))),
+    min_amount: Math.max(0, int(d.min_amount)), min_percent: Math.max(0, num(d.min_percent)),
+    min_plus_interest: d.min_plus_interest !== false, credit_limit: Math.max(0, int(d.credit_limit)),
+    linked_bill_id: String(d.linked_bill_id || ""), updated_on: optDate(d.updated_on, toISO(todayDay())), notes: String(d.notes ?? ""),
     updated: String(d.updated || ""), id: String(d.id || newId()),
   };
 }
 export function normCheckpoint(d) {
-  return { date: d.date, balance: Math.trunc(Number(d.balance) || 0), includes_today: d.includes_today !== false,
+  return { date: isoDate(d.date), balance: int(d.balance), includes_today: d.includes_today !== false,
     note: String(d.note ?? ""), created_at: String(d.created_at ?? ""), id: String(d.id || newId()) };
 }
+const list = (v) => (Array.isArray(v) ? v : []);
 export function normData(d) {
   if (!d || typeof d !== "object" || !Array.isArray(d.items)) throw new Error("This file is not a Balance Tracker backup.");
+  if (Number(d.schema ?? 1) > 1) throw new Error("This backup was made by a newer version of Balance Tracker.");
   return {
     app: "BalanceTracker", schema: 1,
-    settings: { ...DEFAULT_SETTINGS, ...(d.settings || {}) },
+    settings: normSettings(d.settings),
     items: d.items.map(normItem),
-    checkpoints: (d.checkpoints || []).map(normCheckpoint),
-    debts: (d.debts || []).map(normDebt),
-    card_paid: (d.card_paid || []).map(String),
-    deleted: { ...(d.deleted || {}) },
+    checkpoints: list(d.checkpoints).map(normCheckpoint),
+    debts: list(d.debts).map(normDebt),
+    card_paid: list(d.card_paid).map(String),
+    deleted: Object.fromEntries(plainMap(d.deleted).map(([k, v]) => [k, String(v ?? "")])),
     settings_updated: String(d.settings_updated || ""),
   };
 }
@@ -730,7 +782,7 @@ export function collectReminders(data, plan, today, { months = 6, cardCharges = 
   return out.sort((a, b) => (a.day - b.day) || cmpStr(a.title, b.title));
 }
 
-const icsEsc = (t) => t.replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\n/g, "\\n");
+const icsEsc = (t) => t.replace(/\r/g, "").replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\n/g, "\\n");
 function icsFold(line) {
   const enc = new TextEncoder();
   const out = [];
@@ -767,10 +819,14 @@ export function toICS(reminders, at = "09:00", calendarName = "Balance Tracker",
   return lines.map(icsFold).join("\r\n") + "\r\n";
 }
 
+// Text that spreadsheets won't run as a formula (CSV injection). Mirrors storage.csv_text().
+export const csvText = (s) => (/^[=+\-@\t\r]/.test(s) ? "'" + s : s);
+
 // CSV of forecast entries (same columns as the desktop export)
 export function ledgerCSV(entries) {
-  const q = (v) => { const s = String(v ?? ""); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const q = (v) => { const s = String(v ?? ""); return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
   const rows = [["Date", "Description", "Category", "Type", "Amount", "Balance"]];
-  for (const e of entries) rows.push([toISO(e.date), e.description, e.category, e.kind, (e.amount / 100).toFixed(2), (e.balance / 100).toFixed(2)]);
+  for (const e of entries) rows.push([toISO(e.date), csvText(String(e.description ?? "")), csvText(String(e.category ?? "")), e.kind,
+    (e.amount / 100).toFixed(2), (e.balance / 100).toFixed(2)]);
   return "\ufeff" + rows.map((r) => r.map(q).join(",")).join("\r\n") + "\r\n";
 }

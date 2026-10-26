@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 
+from . import encryption
+from .encryption import FileKey
 from .formatting import full_date
 from .models import AppData
 from .sync import stamp
@@ -25,6 +27,7 @@ DATA_FILE = "data.json"
 AUTO_BACKUPS_KEPT = 30  # one per day
 SAFETY_BACKUPS_KEPT = 10  # taken before a restore or erase
 SYNC_COPIES_KEPT = 20  # iPhone copies merged in from the sync folder
+MAX_IMPORT_BYTES = 20 * 1024 * 1024  # far more than years of data; anything bigger isn't a backup
 
 _BACKUP_NAME = re.compile(r"^(auto|before-restore|merged)-(\d{4}-?\d{2}-?\d{2})(?:[_-](\d{6}))?")
 
@@ -43,9 +46,12 @@ def default_data_dir() -> Path:
 
 
 def _atomic_write(path: Path, text: str) -> None:
+    """Write via a temporary file, so a crash never leaves half a file. New files are readable only
+    by this user where the OS supports it (on Windows, the per-user AppData folder already is)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0), 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(text)
         f.flush()
         os.fsync(f.fileno())
@@ -160,17 +166,49 @@ class Store:
 
 
 # ---- manual export / import ------------------------------------------
-def export_backup(data: AppData, path: Path) -> None:
-    _atomic_write(Path(path), json.dumps(data.to_dict(), indent=2))
+class ImportCancelled(Exception):
+    """The user didn't enter the password for a protected backup."""
 
 
-def read_backup(path: Path) -> AppData:
+def export_backup(data: AppData, path: Path, password: str = "") -> None:
+    """Save a backup file, encrypted with `password` if one is given."""
+    text = json.dumps(data.to_dict(), indent=2)
+    if password:
+        text = encryption.seal(text, FileKey.derive(password), "backup")
+    _atomic_write(Path(path), text)
+
+
+def read_backup(path: Path, ask_password=None, keys=()) -> AppData:
+    """Read a backup (or sync) file. For an encrypted one, a matching key from `keys` is tried first,
+    then `ask_password(problem)` is called until it returns the right password or None (cancel)."""
+    path = Path(path)
+    if path.stat().st_size > MAX_IMPORT_BYTES:
+        raise ValueError("The file is too big to be a Balance Tracker backup.")
     with open(path, encoding="utf-8") as f:
         try:
             raw = json.load(f)
         except json.JSONDecodeError as e:
             raise ValueError(f"The file isn't valid JSON ({e.msg}).") from e
+    if encryption.is_encrypted(raw):
+        raw = json.loads(_decrypt(raw, ask_password, keys))
     return AppData.from_dict(raw)
+
+
+def _decrypt(envelope: dict, ask_password, keys) -> str:
+    for key in keys:
+        if key is not None and key.fits(envelope):
+            return encryption.open_with_key(envelope, key)
+    if ask_password is None:
+        raise ValueError("This file is password-protected.")
+    problem = ""
+    while True:
+        password = ask_password(problem)
+        if password is None:
+            raise ImportCancelled()
+        try:
+            return encryption.open_with_passphrase(envelope, password)[0]
+        except encryption.WrongPassword:
+            problem = "That password didn't work. Try again."
 
 
 def merge_data(current: AppData, incoming: AppData) -> AppData:
@@ -190,10 +228,19 @@ def merge_data(current: AppData, incoming: AppData) -> AppData:
     return current
 
 
+_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+
+
+def csv_text(value: str) -> str:
+    """Text for a CSV cell that Excel/Numbers won't run as a formula (CSV injection): a name like
+    "=HYPERLINK(...)" from a sync file becomes "'=HYPERLINK(...)". Mirrors csvText() in web/engine.js."""
+    return "'" + value if value.startswith(_FORMULA_START) else value
+
+
 def export_ledger_csv(entries, path: Path) -> None:
     with open(path, "w", newline="", encoding="utf-8-sig") as f:  # BOM so Excel opens it cleanly
         w = csv.writer(f)
         w.writerow(["Date", "Description", "Category", "Type", "Amount", "Balance"])
         for e in entries:
-            w.writerow([e.date.isoformat(), e.description, e.category, e.kind,
+            w.writerow([e.date.isoformat(), csv_text(e.description), csv_text(e.category), e.kind,
                         f"{e.amount / 100:.2f}", f"{e.balance / 100:.2f}"])

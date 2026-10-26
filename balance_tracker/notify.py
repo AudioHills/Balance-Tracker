@@ -5,14 +5,15 @@
 * `run_daily()` is what `BalanceTracker.exe --send-reminders` runs from Windows Task
   Scheduler: it sends at most one digest per day, then exits.
 * The email password is encrypted with Windows DPAPI (tied to the Windows user) and
-  kept in a separate file that is never part of backups or exports.
+  kept in secrets.json, which is never part of backups or exports (see secure_store.py).
 """
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import os
+import re
+import secrets
 import smtplib
 import ssl
 import subprocess
@@ -25,7 +26,7 @@ from email.message import EmailMessage
 from html import escape
 from pathlib import Path
 
-from . import money
+from . import money, secure_store
 from .debts import full_forecast, make_plan
 from .forecast import projection_end
 from .formatting import month_day, relative_day
@@ -35,9 +36,10 @@ from .models import INCOME, AppData, parse_hhmm
 log = logging.getLogger(__name__)
 
 TASK_NAME = "Balance Tracker Reminders"
-SECRETS_FILE = "secrets.json"
+SECRETS_FILE = secure_store.SECRETS_FILE
 ACTIVITY_LOG = "reminders.log"  # shown in the app as "Last activity"
 CARD_NAG_DAYS = 7  # keep reminding about an unpaid card charge for a week
+MIN_NTFY_TOPIC = 16
 
 EMAIL_PRESETS = {  # label -> (host, port, ssl)
     "Gmail": ("smtp.gmail.com", 587, False),
@@ -48,57 +50,14 @@ EMAIL_PRESETS = {  # label -> (host, port, ssl)
 
 
 # --------------------------------------------------------------------------
-# Password storage (Windows DPAPI)
+# Password storage (Windows DPAPI, in secrets.json — see secure_store.py)
 # --------------------------------------------------------------------------
-def _dpapi(data: bytes, encrypt: bool) -> bytes:
-    import ctypes
-    from ctypes import wintypes
-
-    class Blob(ctypes.Structure):
-        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
-
-    buf = ctypes.create_string_buffer(data, len(data))
-    inp = Blob(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
-    out = Blob()
-    fn = ctypes.windll.crypt32.CryptProtectData if encrypt else ctypes.windll.crypt32.CryptUnprotectData
-    if not fn(ctypes.byref(inp), None, None, None, None, 0, ctypes.byref(out)):
-        raise OSError("Windows could not protect the password")
-    try:
-        return ctypes.string_at(out.pbData, out.cbData)
-    finally:
-        ctypes.windll.kernel32.LocalFree(out.pbData)
-
-
-def protect(secret: str) -> str:
-    raw = secret.encode("utf-8")
-    if sys.platform == "win32":
-        return "dpapi:" + base64.b64encode(_dpapi(raw, True)).decode()
-    return "plain:" + base64.b64encode(raw).decode()  # non-Windows dev/test only
-
-
-def unprotect(token: str) -> str:
-    if not token:
-        return ""
-    kind, _, body = token.partition(":")
-    raw = base64.b64decode(body)
-    if kind == "dpapi":
-        return _dpapi(raw, False).decode("utf-8")
-    return raw.decode("utf-8")
-
-
 def load_password(folder: Path) -> str:
-    try:
-        with open(Path(folder) / SECRETS_FILE, encoding="utf-8") as f:
-            return unprotect(json.load(f).get("smtp_password", ""))
-    except (OSError, ValueError):
-        return ""
+    return secure_store.get(folder, "smtp_password")
 
 
 def save_password(folder: Path, password: str) -> None:
-    folder = Path(folder)
-    folder.mkdir(parents=True, exist_ok=True)
-    with open(folder / SECRETS_FILE, "w", encoding="utf-8") as f:
-        json.dump({"smtp_password": protect(password) if password else ""}, f)
+    secure_store.put(folder, "smtp_password", password)
 
 
 # --------------------------------------------------------------------------
@@ -194,11 +153,16 @@ def compose(data: AppData, today: date) -> Digest | None:
 # --------------------------------------------------------------------------
 # Delivery
 # --------------------------------------------------------------------------
+def _header(text: str) -> str:
+    """A value safe for one email header line (names from a sync file could hold line breaks)."""
+    return " ".join(str(text).split())
+
+
 def send_email(s, password: str, subject: str, text: str, html: str | None = None, timeout: int = 20) -> None:
     msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = s.smtp_user or s.email_to
-    msg["To"] = s.email_to
+    msg["Subject"] = _header(subject)
+    msg["From"] = _header(s.smtp_user or s.email_to)
+    msg["To"] = _header(s.email_to)
     msg.set_content(text)
     if html:
         msg.add_alternative(html, subtype="html")
@@ -210,12 +174,30 @@ def send_email(s, password: str, subject: str, text: str, html: str | None = Non
     with server:
         if not s.smtp_ssl:
             server.starttls(context=ctx)
-        server.login(s.smtp_user or s.email_to, password)
+        server.login(_header(s.smtp_user or s.email_to), password)
         server.send_message(msg)
 
 
+def new_ntfy_topic() -> str:
+    """A topic nobody can guess (about 144 random bits). ntfy.sh topics are public: anyone who knows
+    the name can read the messages, so the name is the only thing keeping reminders private."""
+    return f"bt-{secrets.token_urlsafe(18)}"
+
+
+def ntfy_topic_problem(topic: str) -> str:
+    """Why a topic is unsafe or unusable, or "" if it's fine."""
+    if not re.fullmatch(r"[-_A-Za-z0-9]{1,64}", topic):
+        return "Topic names can only use letters, digits, - and _ (up to 64 characters)."
+    if len(topic) < MIN_NTFY_TOPIC:
+        return (f"Anyone who guesses the topic can read your reminders. Use at least {MIN_NTFY_TOPIC} "
+                "random characters (click New random topic).")
+    return ""
+
+
 def send_ntfy(topic: str, title: str, text: str, timeout: int = 15) -> None:
-    body = json.dumps({"topic": topic, "title": title, "message": text, "tags": ["moneybag"]}).encode()
+    if ntfy_topic_problem(topic):
+        raise ValueError(ntfy_topic_problem(topic))
+    body = json.dumps({"topic": topic, "title": _header(title), "message": text, "tags": ["moneybag"]}).encode()
     req = urllib.request.Request("https://ntfy.sh/", data=body, method="POST",
                                  headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as r:

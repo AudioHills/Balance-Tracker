@@ -4,6 +4,15 @@ A modern Windows desktop app that forecasts your chequing account **day by day**
 Enter your balance, add your paycheques and bills once (weekly, every 2 weeks, twice a month,
 monthly, yearly…), and Balance Tracker works out every future date and the running balance for you.
 
+## What's new in 2.1: security
+
+- **Encrypted iPhone sync:** set a passphrase on the PC and the sync file in iCloud Drive is encrypted
+  (AES-256-GCM). Files made without it are refused, so nobody can read your finances or slip in fake data.
+- **Your iPhone data is encrypted** whenever the app lock is on, unlocked by your passcode or Face ID.
+- **App lock on the PC** too (Settings → Security, **Ctrl+L** to lock now), and password-protected backups.
+- Fixes for script injection through crafted files, spreadsheet formula injection, and more. See
+  [SECURITY.md](SECURITY.md) for how your data is protected and [CHANGELOG.md](CHANGELOG.md) for details.
+
 ## What's new in 2.0
 
 - **Until payday:** how much you can spend each day until your next paycheque and still keep your
@@ -62,7 +71,8 @@ monthly, yearly…), and Balance Tracker works out every future date and the run
   on days something needs doing, e.g. "Pay Visa $11.99 — Spotify", debt payments due, bills,
   paydays and low-balance warnings. It sends through your own Gmail/Outlook/Yahoo/iCloud account
   using an *app password*, which is encrypted with Windows DPAPI and never included in backups.
-  You can also get push notifications through the free **ntfy** app. A Windows scheduled task sends
+  You can also get push notifications through the free **ntfy** app (the topic is a long random name,
+  because anyone who knows it can read the notifications). A Windows scheduled task sends
   the reminders even when the app is closed; it catches up at logon if the PC was off, and sends at
   most one message per day. Activity is logged to `reminders.log` in the data folder.
 - **Calendar reminders:** *📱 Reminders → Export to my calendar* saves a .ics file for Google
@@ -71,10 +81,14 @@ monthly, yearly…), and Balance Tracker works out every future date and the run
   cushion and, if not, the first date it would fit.
 - **Hide balance:** click the 👁 eye next to *Balance today* to show it as `******`, for when someone
   is looking over your shoulder. Each device remembers its own choice.
+- **App lock:** *Settings → Security* asks for a password when Balance Tracker opens and after you've been
+  away (or press `Ctrl+L`). Forgot it? The lock doesn't encrypt anything: quit the app, delete `secrets.json`
+  in the data folder, and set a new one (you'll re-enter your email app password and sync passphrase).
+- **Protected backups:** *Export backup* offers to encrypt the file with a password.
 - **Calendar date pickers:** click any date box to pick a date from a calendar.
 - **Keyboard shortcuts:** `Ctrl+1…6` switch pages, `Ctrl+K` check in, `Ctrl+I` add income,
   `Ctrl+B` add bill, `Ctrl+D` add debt, `Ctrl+A` "Can I afford it?", `Ctrl+F` filter,
-  `Ctrl+Z` undo, `Ctrl+T` light/dark. Press `F1` for the full list.
+  `Ctrl+Z` undo, `Ctrl+T` light/dark, `Ctrl+L` lock. Press `F1` for the full list.
 
 ## iPhone app
 
@@ -86,13 +100,17 @@ engine as the PC: `tests/test_web_engine.py` checks that both produce identical 
 1. On the PC, install **iCloud for Windows** (Microsoft Store), sign in, and turn on iCloud Drive.
 2. In Balance Tracker on the PC, go to **Settings → iPhone sync → Turn on iPhone sync**. The PC then
    keeps `iCloud Drive\Balance Tracker\BalanceTracker-sync.json` up to date.
-3. On the iPhone, tap **⟳ → Choose sync file** and pick that file to pull the PC's data in. To send
-   phone edits back, tap **Send to PC → Save to Files → iCloud Drive → Balance Tracker → Replace**.
+3. Click **Encrypt with a passphrase…** (strongly recommended) and choose a passphrase, or let the app
+   suggest one.
+4. On the iPhone, tap **⟳ → Choose sync file**, pick that file and enter the passphrase (asked only once).
+   To send phone edits back, tap **Send to PC → Save to Files → iCloud Drive → Balance Tracker → Replace**.
    The PC merges them within a minute.
 
-**Face ID lock.** In the iPhone app, go to *More → Settings → Face ID & passcode*. It uses Face ID (via a
-passkey) with a passcode backup, stored only as a salted PBKDF2 hash. Repeated wrong passcodes trigger
-growing wait times, and balances are blurred in the app switcher.
+**Face ID lock and encryption.** In the iPhone app, go to *More → Settings → Face ID & passcode*. Once a
+passcode is set, everything the app keeps on the phone is encrypted; Face ID (a passkey, iOS 18 or later)
+or the passcode unlocks it. It locks when you leave the app and after 5 minutes without a tap, wrong
+passcodes trigger growing waits (with an optional erase after 10), and balances are blurred in the app
+switcher.
 
 Each income/bill and debt carries a change timestamp, and deletions are remembered. Merging keeps
 the newest version of every record, so edits made on either device survive whichever order you sync in.
@@ -162,10 +180,12 @@ Code layout:
 | `balance_tracker/insights.py` | Monthly totals, bills by category, card charges, unplanned spending, payday outlook |
 | `balance_tracker/debts.py` | Debt payoff simulation and the cushion-aware payment planner |
 | `balance_tracker/formatting.py` | Shared wording for dates, times and counts |
-| `balance_tracker/storage.py` | Load/save, automatic backups, import/export, CSV |
-| `balance_tracker/sync.py` | iPhone sync: change stamps, deletion markers, record-level merge |
+| `balance_tracker/storage.py` | Load/save, automatic backups, import/export (optionally encrypted), CSV |
+| `balance_tracker/sync.py` | iPhone sync: change stamps, deletion markers, record-level merge, encrypted sync file |
+| `balance_tracker/encryption.py` | AES-256-GCM files for sync and backups (same format as `web/crypto.js`) |
+| `balance_tracker/secure_store.py`, `applock.py` | DPAPI-protected secrets file; the desktop app lock |
 | `balance_tracker/notify.py` | Daily reminder digest, email/ntfy delivery, Windows scheduled task |
 | `balance_tracker/reminders.py` | Calendar (.ics) export |
 | `balance_tracker/updates.py`, `logs.py` | Check for updates; the application log |
 | `balance_tracker/ui/` | PySide6 (Qt) interface: `main_window.py` (state and actions), `pages/` (one module per page), `dialogs/`, `charts.py`, `widgets.py`, `theme.py` |
-| `web/` | iPhone web app: `engine.js` (port of the engine), `app.js` (UI), service worker, manifest |
+| `web/` | iPhone web app: `engine.js` (port of the engine), `app.js` (UI), `lock.js` (lock and encryption at rest), `crypto.js`, service worker, manifest |

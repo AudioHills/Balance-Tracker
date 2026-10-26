@@ -5,6 +5,9 @@ tombstone in `AppData.deleted`, and the settings both devices share carry
 `settings_updated`. `merge()` combines two copies record by record, keeping the
 newest version of each, so edits made on either device survive. The same rules
 are implemented in web/engine.js.
+
+With a sync passphrase set, the file is encrypted (see encryption.py) and only copies made with
+that passphrase are merged: anything else in the folder is reported, never trusted.
 """
 from __future__ import annotations
 
@@ -15,6 +18,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from . import encryption
+from .encryption import FileKey
 from .models import AppData
 
 log = logging.getLogger(__name__)
@@ -22,6 +27,7 @@ log = logging.getLogger(__name__)
 SYNC_FILE = "BalanceTracker-sync.json"
 SYNC_SUBFOLDER = "Balance Tracker"
 TOMBSTONE_DAYS = 365
+MAX_SYNC_BYTES = 20 * 1024 * 1024  # far more than years of data; anything bigger isn't ours
 
 # Settings that follow you between devices (everything else is per-device).
 SHARED_SETTINGS = ("currency_symbol", "low_balance_threshold", "forecast_months", "account_name",
@@ -29,7 +35,7 @@ SHARED_SETTINGS = ("currency_symbol", "low_balance_threshold", "forecast_months"
 # Never written to the sync file.
 PRIVATE_SETTINGS = ("email_enabled", "email_to", "smtp_host", "smtp_port", "smtp_user", "smtp_ssl",
                     "ntfy_enabled", "ntfy_topic", "notify_last_sent", "notify_task", "sync_enabled",
-                    "sync_folder", "reminder_time", "notify_card", "notify_debts", "notify_bills",
+                    "sync_folder", "sync_encrypt", "reminder_time", "notify_card", "notify_debts", "notify_bills",
                     "notify_paydays", "notify_low", "notify_days_before", "notify_time", "theme",
                     "prompt_on_open", "hide_balance")
 
@@ -134,18 +140,19 @@ def default_sync_folder() -> Path | None:
     return root / SYNC_SUBFOLDER if root else None
 
 
-def sync_payload(data: AppData) -> str:
+def sync_payload(data: AppData, key: FileKey | None = None) -> str:
     d = data.to_dict()
     d["settings"] = {k: v for k, v in d["settings"].items() if k not in PRIVATE_SETTINGS}
     d["device"] = "pc"
-    return json.dumps(d, indent=1)
+    text = json.dumps(d, indent=1)
+    return encryption.seal(text, key, "sync") if key else text
 
 
-def write_sync_file(folder: Path, data: AppData) -> None:
+def write_sync_file(folder: Path, data: AppData, key: FileKey | None = None) -> None:
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     tmp = folder / (SYNC_FILE + ".tmp")
-    tmp.write_text(sync_payload(data), encoding="utf-8")
+    tmp.write_text(sync_payload(data, key), encoding="utf-8")
     os.replace(tmp, folder / SYNC_FILE)
 
 
@@ -162,20 +169,53 @@ class PullResult:
     data: AppData  # the local data with everything in the folder merged in
     changed: bool  # whether that differs from the local data
     copies: list[Path] = field(default_factory=list)  # merged extra copies, safe to tidy away
+    problems: list[str] = field(default_factory=list)  # files that were refused, and why
 
 
-def pull_folder(folder: Path, local: AppData) -> PullResult:
+class Refused(ValueError):
+    """A sync file that will never be merged as it is (wrong passphrase, unencrypted, too big)."""
+
+
+def read_sync_file(path: Path, key: FileKey | None = None, require_encrypted: bool = False) -> AppData:
+    """Read one sync file. Raises Refused for files that must not be merged, or OSError/ValueError
+    for ones that can't be read yet (e.g. still downloading from iCloud)."""
+    if path.stat().st_size > MAX_SYNC_BYTES:
+        raise Refused(f"{path.name} is too big to be a sync file")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if encryption.is_encrypted(raw):
+        if raw.get("kind") != "sync":
+            raise Refused(f"{path.name} is an encrypted backup, not a sync file")
+        if key is None:
+            raise Refused(f"{path.name} is encrypted — set the sync passphrase on this PC to read it")
+        try:
+            raw = json.loads(encryption.open_with_key(raw, key))
+        except encryption.WrongPassword as e:
+            raise Refused(f"{path.name} was encrypted with a different passphrase — on your iPhone, choose "
+                          "the sync file again and enter this PC's passphrase") from e
+    elif require_encrypted:
+        raise Refused(f"{path.name} isn't encrypted, so it was ignored — on your iPhone, choose the sync "
+                      "file again (it will ask for the passphrase), then send your changes again")
+    return AppData.from_dict(raw)
+
+
+def pull_folder(folder: Path, local: AppData, key: FileKey | None = None,
+                require_encrypted: bool = False) -> PullResult:
     """Merge every sync file in `folder` (the PC's own plus any the phone saved) into `local`.
-    Files that can't be read yet (e.g. still downloading from iCloud) are skipped this time."""
+    Files that can't be read yet (e.g. still downloading from iCloud) are skipped this time;
+    files that are refused are reported in `problems` and left where they are."""
     merged = local
-    copies = []
+    copies, problems = [], []
     for p in sync_files(folder):
         try:
-            remote = AppData.from_dict(json.loads(p.read_text(encoding="utf-8")))
+            remote = read_sync_file(p, key, require_encrypted)
+        except Refused as e:
+            log.warning("Refusing sync file: %s", e)
+            problems.append(str(e))
+            continue
         except (OSError, ValueError, KeyError, TypeError) as e:
             log.info("Skipping sync file %s for now: %s", p.name, e)
             continue
         merged = merge(merged, remote)
         if p.name != SYNC_FILE:
             copies.append(p)
-    return PullResult(merged, not same(merged, local), copies)
+    return PullResult(merged, not same(merged, local), copies, problems)

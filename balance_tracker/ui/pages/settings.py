@@ -34,6 +34,7 @@ class SettingsPage(Page):
         self._build_preferences()
         self._build_start()
         self._build_sync()
+        self._build_security()
         self._build_data()
         self._build_about()
         self.body.addStretch(1)
@@ -108,7 +109,33 @@ class SettingsPage(Page):
         self.sync_now = QPushButton("Sync now")
         self.sync_now.clicked.connect(lambda: self.ctx.sync_in(force=True) or self.ctx.toast("Up to date"))
         phone.lay.addLayout(hbox(self.sync_btn, choose, self.sync_now, None))
+        self.enc_status = label("", "Muted", wrap=True)
+        self.enc_btn = QPushButton()
+        self.enc_btn.clicked.connect(self.ctx.set_sync_passphrase)
+        self.enc_off = QPushButton("Turn off encryption")
+        self.enc_off.clicked.connect(self.ctx.turn_off_sync_encryption)
+        phone.lay.addWidget(self.enc_status)
+        phone.lay.addLayout(hbox(self.enc_btn, self.enc_off, None))
         self.body.addWidget(phone)
+
+    def _build_security(self):
+        sec = Card()
+        sec.lay.addWidget(label("🔒 Security", "SectionTitle"))
+        self.lock_status = label("", "Muted", wrap=True)
+        sec.lay.addWidget(self.lock_status)
+        self.lock_btn = QPushButton()
+        self.lock_btn.clicked.connect(self.ctx.lock_settings)
+        self.lock_now_btn = QPushButton("Lock now  (Ctrl+L)")
+        self.lock_now_btn.clicked.connect(lambda: self.ctx.lock_now())
+        self.lock_off = QPushButton("Turn off the lock")
+        self.lock_off.clicked.connect(self.ctx.remove_lock)
+        sec.lay.addLayout(hbox(self.lock_btn, self.lock_now_btn, self.lock_off, None))
+        sec.lay.addWidget(label(
+            "Your email app password, sync passphrase and lock password are encrypted with Windows' own protection "
+            "(tied to your Windows account on this PC) and are never put in backups or the sync file. Your data file "
+            "is protected by your Windows sign-in — turn on BitLocker or Device encryption so it stays safe if the PC "
+            "is lost or stolen.", "Hint", wrap=True))
+        self.body.addWidget(sec)
 
     def _build_data(self):
         data = Card()
@@ -175,6 +202,7 @@ class SettingsPage(Page):
         self.data_path.setText(f"Your data is stored at: {self.ctx.store.path}\n"
                                f"If something goes wrong, details are written to {log_file}")
         self._refresh_sync()
+        self._refresh_security()
         self.auto.clear()
         # Merged iPhone copies stay in the folder but aren't offered here: they're sync files, which
         # leave out PC-only settings, so restoring one would switch off sync and email reminders.
@@ -198,9 +226,9 @@ class SettingsPage(Page):
         app_link = (f"<br>Phone app: <a href='{WEB_APP_URL}'>{WEB_APP_URL}</a> — open it in Safari, then "
                     "Share → Add to Home Screen." if WEB_APP_URL else "")
         if s.sync_enabled and s.sync_folder:
-            err = self.ctx.sync_error
-            problem = (f"<br><span style='color:{theme.colors()['negative']}'>Problem: {escape(err)}</span>"
-                       if err else "")
+            problems = ([self.ctx.sync_error] if self.ctx.sync_error else []) + self.ctx.sync_refused
+            problem = "".join(f"<br><span style='color:{theme.colors()['negative']}'>Problem: {escape(err)}</span>"
+                              for err in problems)
             self.sync_status.setText(f"✓ On — syncing through <b>{escape(s.sync_folder)}</b>{problem}"
                                      "<br>On your iPhone: Files → iCloud Drive → Balance Tracker." + app_link)
             self.sync_btn.setText("Turn off")
@@ -215,6 +243,37 @@ class SettingsPage(Page):
         self.sync_btn.setObjectName("" if s.sync_enabled else "Primary")
         repolish(self.sync_btn)
         self.sync_now.setVisible(s.sync_enabled)
+        on = s.sync_enabled
+        for w in (self.enc_status, self.enc_btn):
+            w.setVisible(on)
+        self.enc_off.setVisible(on and s.sync_encrypt)
+        if s.sync_encrypt:
+            self.enc_status.setText("🔒 The sync file is encrypted with your passphrase. Only devices that know it "
+                                    "can read it, and files made without it are ignored.")
+            self.enc_btn.setText("Change passphrase…")
+            self.enc_btn.setObjectName("")
+        else:
+            self.enc_status.setText("⚠ The sync file isn't encrypted: anyone who can open this iCloud folder (or your "
+                                    "iCloud account) can read your balances, bills and debts.")
+            self.enc_btn.setText("Encrypt with a passphrase…")
+            self.enc_btn.setObjectName("Primary" if on else "")
+        repolish(self.enc_btn)
+
+    def _refresh_security(self):
+        cfg = self.ctx.lock_cfg
+        if cfg is None:
+            self.lock_status.setText("App lock is off: anyone who can use this Windows account can open Balance "
+                                     "Tracker.")
+            self.lock_btn.setText("Set a password…")
+        else:
+            when = (f" and after {cfg.idle_minutes} minute{'s' if cfg.idle_minutes != 1 else ''} away"
+                    if cfg.idle_minutes else "")
+            minimize = ", or when you minimize it" if cfg.lock_on_minimize else ""
+            self.lock_status.setText(f"✓ App lock is on: Balance Tracker asks for your password when it opens{when}"
+                                     f"{minimize}.")
+            self.lock_btn.setText("Change…")
+        self.lock_now_btn.setVisible(cfg is not None)
+        self.lock_off.setVisible(cfg is not None)
 
     # ---- actions ---------------------------------------------------------
     def toggle_sync(self):

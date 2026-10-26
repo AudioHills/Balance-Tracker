@@ -2,10 +2,9 @@
 from __future__ import annotations
 
 import copy
-import secrets
 from datetime import date
 
-from PySide6.QtCore import Qt, QTime
+from PySide6.QtCore import Qt, QTime, QTimer
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -29,6 +28,8 @@ from .. import theme
 from ..widgets import hbox, label
 from ..workers import run_in_background
 from .base import BaseDialog
+
+TEST_COOLDOWN_MS = 20_000
 
 
 class NotifyDialog(BaseDialog):
@@ -86,18 +87,23 @@ class NotifyDialog(BaseDialog):
         # --- ntfy
         self.ntfy_on = QCheckBox("Also send a phone notification with the free ntfy app")
         self.ntfy_on.setChecked(s.ntfy_enabled)
-        self.topic = QLineEdit(s.ntfy_topic or f"balance-tracker-{secrets.token_hex(5)}")
+        self.topic = QLineEdit(s.ntfy_topic or notify.new_ntfy_topic())
+        self.topic.setMaxLength(64)
         copy_btn = QPushButton("Copy")
         copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(self.topic.text()))
+        new_btn = QPushButton("New random topic")
+        new_btn.setToolTip("Pick a new unguessable topic (then subscribe to it again in the ntfy app)")
+        new_btn.clicked.connect(lambda: self.topic.setText(notify.new_ntfy_topic()))
         nf = QFormLayout()
         nf.setLabelAlignment(Qt.AlignRight)
         nf.setVerticalSpacing(8)
         nf.addRow("", self.ntfy_on)
-        nf.addRow("Topic", hbox(self.topic, copy_btn))
+        nf.addRow("Topic", hbox(self.topic, copy_btn, new_btn))
         nf.addRow("", label("Install <b>ntfy</b> from the Play Store or App Store → tap <b>+</b> → "
                             "<b>Subscribe to topic</b> → paste the topic above. Messages go through the public "
-                            "ntfy.sh service; keep the topic name private (it works like a password).",
-                            "Hint", wrap=True))
+                            "ntfy.sh service, where <b>anyone who knows the topic can read them</b> — keep it "
+                            "random and private, like a password.",
+                            "Hint", wrap=True, rich=True))
 
         # --- content + timing
         self.n_card = QCheckBox("Pay-your-card reminders (bills charged to a credit card)")
@@ -202,8 +208,9 @@ class NotifyDialog(BaseDialog):
             if not self.password.text() and not self.has_saved_pw:
                 QMessageBox.warning(self, "App password", "Enter the app password for the sending account.")
                 return False
-        if self.ntfy_on.isChecked() and len(self.topic.text().strip()) < 6:
-            QMessageBox.warning(self, "Topic", "Pick a longer, hard-to-guess topic name.")
+        problem = notify.ntfy_topic_problem(self.topic.text().strip())
+        if self.ntfy_on.isChecked() and problem:
+            QMessageBox.warning(self, "Topic", problem)
             return False
         return True
 
@@ -227,7 +234,8 @@ class NotifyDialog(BaseDialog):
         run_in_background(self, lambda: notify.deliver(trial, self.folder, digest), self._test_done)
 
     def _test_done(self, errors: list | None, crash: Exception | None):
-        self.test_btn.setEnabled(True)
+        # A short cooldown, so a stuck button can't fire off a burst of emails from your account
+        QTimer.singleShot(TEST_COOLDOWN_MS, lambda: self.test_btn.setEnabled(True))
         col = theme.colors()
         errors = [str(crash)] if crash else errors
         if errors:

@@ -52,5 +52,15 @@ def latest_release(timeout: float = 10, opener=urllib.request.urlopen) -> Releas
     tag = str(info.get("tag_name") or "")
     if not parse_version(tag):
         raise ValueError(f"Unexpected release tag {tag!r}")
-    return Release(version=tag.lstrip("vV"), url=str(info.get("html_url") or RELEASES_URL),
-                   name=str(info.get("name") or ""))
+    return Release(version=tag.lstrip("vV")[:40], url=safe_release_url(info.get("html_url")),
+                   name=str(info.get("name") or "")[:200])
+
+
+def safe_release_url(url) -> str:
+    """The release page to send the user to. Anything that isn't this repository's page on github.com
+    (a tampered or unexpected reply) is replaced by the plain releases link."""
+    prefix = f"https://github.com/{REPO}/releases/".lower()
+    text = str(url or "")
+    if text.lower().startswith(prefix) and all(c.isalnum() or c in "/-._~%" for c in text[len(prefix):]):
+        return text
+    return RELEASES_URL

@@ -39,7 +39,7 @@ ROOT = Path(__file__).resolve().parent.parent
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 
 # Names with characters that need escaping in calendar files or sort differently in naive code
-NAMES = ["Pay; main job", "Rent, unit 4", "Hydro \\ water", "Café ☕", "Netflix 🎬", "car loan", "Phone",
+NAMES = ["Pay; main job", "Rent, unit 4", "Hydro \\ water", "Café ☕", "Netflix 🎬", "car loan", "Phone\r\nplan",
          "Gym; monthly", "Insurance"]
 CATEGORIES = ["Food", "food ", "Housing", "Utilities"]
 
@@ -220,3 +220,62 @@ def test_reminders_match_python(tmp_path):
     for k, (exp, js) in enumerate(zip(expected, got, strict=True)):
         assert js["reminders"] == exp["reminders"], f"scenario {k}: reminders differ"
         assert js["ics"] == exp["ics"], f"scenario {k}: calendar file differs"
+
+
+def test_encrypted_files_open_on_both_devices(tmp_path):
+    """The PC and the phone must read each other's encrypted sync files and backups."""
+    from balance_tracker import encryption
+    from balance_tracker.encryption import FileKey
+    fast = encryption.MIN_ITERATIONS
+    text = json.dumps(rand_data(random.Random(3), date(2026, 5, 1)).to_dict())
+    pc_key = FileKey.derive("Pass phrase ☕ 42", iterations=fast)
+    pc_file = json.loads(encryption.seal(text, pc_key, "sync"))
+    tampered = {**pc_file, "kind": "backup"}
+    scenarios = [{"open": pc_file, "passphrase": "Pass phrase ☕ 42"},
+                 {"open": pc_file, "passphrase": "Pass phrase ☕ 43"},
+                 {"open": tampered, "passphrase": "Pass phrase ☕ 42"},
+                 {"open": {**pc_file, "iterations": 10}, "passphrase": "Pass phrase ☕ 42"},
+                 {"seal": text, "passphrase": "phone passphrase", "iterations": fast, "kind": "backup"}]
+    opened, wrong, swapped, weak, sealed = run_node(tmp_path, scenarios)
+    assert opened == {"text": text}
+    assert wrong["error"] == swapped["error"] == "WrongPassword"
+    assert "doesn't support" in weak["message"]
+    phone_file = sealed["envelope"]
+    assert phone_file["kind"] == "backup" and "items" not in json.dumps(phone_file)
+    assert encryption.open_with_passphrase(phone_file, "phone passphrase")[0] == text
+    with pytest.raises(encryption.WrongPassword):
+        encryption.open_with_passphrase(phone_file, "phone passphrasE")
+
+
+def test_phone_rejects_or_cleans_hostile_files(tmp_path):
+    """normData() must never let markup, impossible dates or odd types through (they'd end up in the page)."""
+    good = AppData()
+    good.checkpoints.append(Checkpoint(date(2026, 10, 1), 100000))
+    good.items.append(RecurringItem("Rent", 150000, BILL, "monthly", date(2026, 10, 1)))
+    base = good.to_dict()
+
+    def with_item(**kw):
+        return {**base, "items": [{**base["items"][0], **kw}]}
+
+    xss = '2026-10-01"><img src=x onerror=alert(1)>'
+    bad = [with_item(start_date=xss), with_item(end_date="2026-02-30"), with_item(overrides={xss: 5}),
+           {**base, "checkpoints": [{**base["checkpoints"][0], "date": "0026-10-01"}]},
+           {**base, "schema": 99}, {"no": "items"}]
+    settings = {"currency_symbol": '<img src=x onerror="alert(1)">', "forecast_months": 10**9,
+                "low_balance_threshold": "abc", "debt_mode": "<script>", "email_to": "x@example.com"}
+    cleaned = {**base, "settings": settings, "deleted": {"__proto__": "x", "ok": 5},
+               "items": [{**base["items"][0], "amount": "1e400", "second_day": -4}]}
+    texts = ["=1+1", "+cmd", "-5", "@SUM(A1)", "\tx", "Rent", " =padded", "<b>€</b>", "  ", "€£¥₹₩"]
+    got = run_node(tmp_path, [{"validate": b} for b in bad] + [{"validate": cleaned}, {"texts": texts}])
+    for k, res in enumerate(got[:len(bad)]):
+        assert "error" in res, f"hostile file {k} was accepted"
+    data = got[len(bad)]["data"]
+    s = data["settings"]
+    assert s["currency_symbol"] == "img " and s["forecast_months"] == 36 and s["low_balance_threshold"] == 10000
+    assert s["debt_mode"] == "auto" and "email_to" not in s
+    assert data["deleted"] == {"ok": "5"} and data["items"][0]["amount"] == 0 and data["items"][0]["second_day"] == 1
+    from balance_tracker.models import clean_symbol
+    from balance_tracker.storage import csv_text
+    parity = got[-1]
+    assert parity["csv"] == [csv_text(t) for t in texts]
+    assert parity["symbols"] == [clean_symbol(t) for t in texts]

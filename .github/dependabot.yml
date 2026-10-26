@@ -1,0 +1,11 @@
+# Weekly pull requests for security fixes and updates to the Python packages and GitHub Actions.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly

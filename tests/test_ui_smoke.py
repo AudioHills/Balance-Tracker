@@ -6,6 +6,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+from PySide6 import QtCore  # noqa: E402
 
 from balance_tracker import storage  # noqa: E402
 from balance_tracker.forecast import add_months  # noqa: E402
@@ -427,3 +428,144 @@ def test_restore_list_leaves_out_phone_sync_copies(app, tmp_path):
     labels = [w.pages[5].auto.itemText(i) for i in range(w.pages[5].auto.count())]
     assert any(t.startswith("Automatic backup") for t in labels)
     assert not any("iPhone" in t for t in labels)
+
+
+def test_names_from_a_file_are_never_rendered_as_markup(app, tmp_path):
+    from balance_tracker.models import Debt, RecurringItem
+    w, t = sample_window(tmp_path)
+    card = Debt("<a href='file:///C:/evil.exe'>Visa</a>", 0, 19.99, id="card")
+    w.data.debts.append(card)
+    w.data.items.append(RecurringItem("<h1>Netflix</h1>", 1599, BILL, "monthly", t, paid_with="card"))
+    w.commit(toast="Added “<b>x</b>”")
+    w.go(0)
+    app.processEvents()
+    assert w.toast_w.text.textFormat() == QtCore.Qt.PlainText
+    shown = [lb for lb in w.pages[0].widget.findChildren(QtWidgets.QLabel) if "Netflix" in lb.text()]
+    assert shown and all("&lt;h1&gt;" in lb.text() or lb.textFormat() == QtCore.Qt.PlainText for lb in shown)
+    for lb in w.findChildren(QtWidgets.QLabel):
+        if lb.textFormat() != QtCore.Qt.PlainText:
+            assert "<h1>" not in lb.text() and "<a href='file" not in lb.text()
+
+
+def test_app_lock_hides_everything_until_the_password(app, tmp_path, monkeypatch):
+    from balance_tracker import applock
+    w, _ = sample_window(tmp_path)
+    w.show()
+    w.lock_now()  # no password set yet: just a hint
+    assert w.isVisible() and "Set a lock password" in w.toast_w.text.text()
+    applock.set_password(tmp_path, "open sesame", idle_minutes=1)
+    seen = {}
+
+    def unlock_screen(screen):
+        seen["hidden"] = not w.isVisible()
+        screen.password.setText("wrong one")
+        screen.try_unlock()
+        seen["wrong"] = screen.message.text()
+        screen.password.setText("open sesame")
+        screen.try_unlock()
+        return screen.result()
+
+    monkeypatch.setattr(dialogs.LockScreen, "exec", unlock_screen)
+    w.lock_now()
+    assert seen == {"hidden": True, "wrong": "Wrong password"} and w.isVisible()
+    # it locks by itself after the idle time
+    w.lock_cfg = applock.load(tmp_path)
+    monkeypatch.setattr("balance_tracker.ui.main_window.system_idle_seconds", lambda: 61.0)
+    seen.clear()
+    w._check_idle()
+    assert seen.get("hidden") is True
+    # Quit on the lock screen closes the app
+    quits = []
+    monkeypatch.setattr(dialogs.LockScreen, "exec", lambda screen: 0)
+    monkeypatch.setattr(QtWidgets.QApplication, "quit", lambda: quits.append(1))
+    w.lock_now()
+    assert quits == [1]
+
+
+def test_lock_setup_and_removal(app, tmp_path, monkeypatch):
+    from balance_tracker import applock
+    w, _ = sample_window(tmp_path)
+
+    def setup(dlg):
+        dlg.new.setText("open sesame")
+        dlg.confirm.setText("open sesame")
+        dlg.idle.setCurrentIndex(dlg.idle.findData(15))
+        dlg.accept()
+        return 1
+
+    monkeypatch.setattr(dialogs.LockSetupDialog, "exec", setup)
+    w.lock_settings()
+    assert applock.load(tmp_path).idle_minutes == 15 and w.lock_cfg is not None
+    w.go(5)
+    assert "lock is on" in w.pages[5].lock_status.text()
+    answers = iter(["nope", "open sesame"])
+    monkeypatch.setattr("balance_tracker.ui.main_window.ask_password", lambda *a, **k: next(answers))
+    w.remove_lock()
+    assert applock.load(tmp_path) is None and w.lock_cfg is None
+
+
+def test_encrypted_sync_from_the_pc(app, tmp_path, monkeypatch):
+    import json
+
+    from balance_tracker import sync
+    from balance_tracker.ui import main_window
+    monkeypatch.setattr(main_window, "run_in_background", lambda parent, work, done: done(work(), None))
+    w, _ = sample_window(tmp_path / "pc")
+    folder = tmp_path / "iCloudDrive" / "Balance Tracker"
+    w.enable_sync(str(folder))
+
+    def choose(dlg):
+        dlg.phrase.setText("my sync passphrase")
+        dlg.confirm.setText("my sync passphrase")
+        dlg.accept()
+        return 1
+
+    monkeypatch.setattr(dialogs.SyncPassphraseDialog, "exec", choose)
+    w.set_sync_passphrase()
+    shared = folder / sync.SYNC_FILE
+    raw = json.loads(shared.read_text())
+    assert w.data.settings.sync_encrypt and raw["kind"] == "sync" and "Rent" not in shared.read_text()
+    # a copy dropped in the folder without the passphrase is ignored and reported
+    (folder / "BalanceTracker-sync 2.json").write_text(json.dumps(w.data.to_dict()))
+    assert w.sync_in(force=True) == 0
+    assert w.sync_refused and (folder / "BalanceTracker-sync 2.json").exists()
+    w.go(5)
+    assert "encrypted, so it was ignored" in w.pages[5].sync_status.text()
+    # the key survives a restart (it's in secrets.json, not data.json)
+    w2 = main_window.MainWindow(w.store, w.store.load())
+    assert w2.sync_key == w.sync_key and "my sync passphrase" not in w.store.path.read_text()
+    # turning encryption off writes the file in the clear again
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question", lambda *a, **k: QtWidgets.QMessageBox.Yes)
+    w.turn_off_sync_encryption()
+    assert not w.data.settings.sync_encrypt and "Rent" in shared.read_text()
+
+
+def test_export_backup_with_a_password(app, tmp_path, monkeypatch):
+    out = tmp_path / "backup.json"
+
+    def protect(dlg):
+        dlg.password.setText("backup password")
+        dlg.confirm.setText("backup password")
+        dlg.accept()
+        return 1
+
+    monkeypatch.setattr(dialogs.BackupPasswordDialog, "exec", protect)
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName", lambda *a, **k: (str(out), ""))
+    w, _ = sample_window(tmp_path)
+    w.export_backup()
+    assert "Rent" not in out.read_text()
+    monkeypatch.setattr("balance_tracker.ui.main_window.ask_password", lambda *a, **k: "backup password")
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", lambda self: self.clickedButton())
+    restored = storage.read_backup(out, lambda problem: "backup password")
+    assert {i.name for i in restored.items} == {"Pay", "Rent", "Phone"}
+
+
+def test_undo_never_turns_sync_encryption_off(app, tmp_path):
+    w, t = sample_window(tmp_path)
+    w.snapshot()
+    w.data.items.pop()
+    w.commit(undoable=True)
+    w.data.settings.sync_encrypt = True  # turned on in Settings after that change
+    w.commit()
+    w.undo()
+    assert len(w.data.items) == 3 and w.data.settings.sync_encrypt

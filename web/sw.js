@@ -1,7 +1,7 @@
 // Offline support. Online: always fetch the newest version (so updates show up on the next
 // open). Offline or slow network: fall back to the cached copy.
-const VERSION = "bt-web-2.0.0";
-const SHELL = ["./", "index.html", "app.js", "engine.js", "lock.js", "styles.css", "manifest.webmanifest",
+const VERSION = "bt-web-2.1.0";
+const SHELL = ["./", "index.html", "app.js", "engine.js", "lock.js", "crypto.js", "styles.css", "manifest.webmanifest",
   "icons/icon-180.png", "icons/icon-192.png", "icons/icon-512.png"];
 
 self.addEventListener("install", (e) => {

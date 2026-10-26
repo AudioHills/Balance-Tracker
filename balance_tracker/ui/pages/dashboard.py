@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from html import escape
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFormLayout, QGridLayout, QHBoxLayout, QPushButton, QVBoxLayout
@@ -212,9 +213,9 @@ class DashboardPage(Page):
         col = theme.colors()
         for c in due:
             late = c.occurrence.date < today
-            txt = label(f"<b>{money.fmt(c.amount)}</b> to {c.card.name} — {c.occurrence.item.name} "
-                        f"<span style='color:{col['negative' if late else 'muted']}'>"
-                        f"({nice_date(c.occurrence.date, today)})</span>")
+            txt = label(f"<b>{escape(money.fmt(c.amount))}</b> to {escape(c.card.name)} — "
+                        f"{escape(c.occurrence.item.name)} <span style='color:{col['negative' if late else 'muted']}'>"
+                        f"({escape(nice_date(c.occurrence.date, today))})</span>", rich=True)
             btn = QPushButton("✓ Paid")
             btn.setObjectName("Chip")
             btn.setCursor(Qt.PointingHandCursor)

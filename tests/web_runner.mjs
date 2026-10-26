@@ -1,9 +1,28 @@
 // Runs web/engine.js over scenarios from tests/test_web_engine.py and prints results as JSON.
 import { readFileSync } from "node:fs";
+import * as C from "../web/crypto.js";
 import * as E from "../web/engine.js";
 
 const scenarios = JSON.parse(readFileSync(process.argv[2], "utf8"));
-const out = scenarios.map((sc) => {
+
+async function security(sc) {
+  if (sc.open) {
+    try { return { text: (await C.openWithPassphrase(sc.open, sc.passphrase)).text }; } catch (e) { return { error: e.name, message: e.message }; }
+  }
+  if (sc.seal !== undefined) {
+    const key = await C.newFileKey(sc.passphrase, C.randomBytes(16), sc.iterations);
+    return { envelope: JSON.parse(await C.seal(sc.seal, key, sc.kind)) };
+  }
+  if (sc.validate) {
+    try { return { data: E.normData(sc.validate) }; } catch (e) { return { error: e.message }; }
+  }
+  return { csv: sc.texts.map(E.csvText), symbols: sc.texts.map(E.cleanSymbol) };
+}
+
+const out = [];
+for (const sc of scenarios) out.push(sc.open || sc.seal !== undefined || sc.validate || sc.texts ? await security(sc) : run(sc));
+
+function run(sc) {
   if (sc.reminders) {
     const data = E.normData(sc.data);
     const today = E.toDay(sc.today);
@@ -47,5 +66,5 @@ const out = scenarios.map((sc) => {
     }
   }
   return res;
-});
+}
 process.stdout.write(JSON.stringify(out));

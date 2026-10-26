@@ -1,9 +1,19 @@
-// Balance Tracker — iPhone web app. All data stays on the phone (localStorage);
-// syncing with the PC happens through a file in iCloud Drive.
+// Balance Tracker — iPhone web app. All data stays on the phone (localStorage; encrypted when the
+// app lock is on); syncing with the PC happens through a file in iCloud Drive (encrypted when a
+// sync passphrase is set on the PC).
+import * as C from "./crypto.js";
 import * as E from "./engine.js";
 import * as L from "./lock.js";
 
-const KEY = "bt-data-v1";
+// Never run inside another site's frame (clickjacking). GitHub Pages can't send a frame-ancestors header.
+if (window.top !== window.self) {
+  document.body.textContent = "Open Balance Tracker directly.";
+  throw new Error("Balance Tracker won't run inside a frame");
+}
+
+const KEY = "bt-data-v1"; // the data, when the lock is off
+const SYNC_KEY = "bt-sync-v1"; // the sync file's key, when the lock is off
+const DAMAGED = "bt-data-damaged"; // saved data that couldn't be read, kept rather than thrown away
 const META = "bt-meta-v1";
 const SYNC_NAME = "BalanceTracker-sync.json";
 const $ = (s, r = document) => r.querySelector(s);
@@ -19,17 +29,76 @@ let tab = "home";
 let locked = L.enabled();
 let hiddenAt = null;
 const ui = { range: 3, everyDay: false, daysAhead: 60, billFilter: "all" };
+// While unlocked with the lock on: the data key and the AES key made from it. Null when locked.
+let dek = null, vaultKey = null;
+// The sync passphrase's key ({salt, iterations, raw}) once it's been entered, and a ready-to-use copy.
+let syncStored = null, syncFileKey = null;
+let saving = Promise.resolve(); // encrypted writes, in order
 
 // ------------------------------------------------------------------ storage
-function load() {
-  try { data = E.normData(JSON.parse(localStorage.getItem(KEY))); } catch { data = E.emptyData(); }
+const encrypted = () => L.enabled() && !L.legacy();
+function loadMeta() {
   try { meta = { unsent: false, lastSync: null, lastPrompt: null, ...JSON.parse(localStorage.getItem(META) || "{}") }; }
   catch { meta = { unsent: false, lastSync: null, lastPrompt: null }; }
+}
+/** Read the data. Something that can't be read is kept aside (never silently replaced) and the user told. */
+function adopt(raw) {
+  try { data = raw ? E.normData(raw) : E.emptyData(); }
+  catch {
+    try { localStorage.setItem(DAMAGED, JSON.stringify(raw)); } catch { /* storage full: nothing more we can do */ }
+    data = E.emptyData();
+    setTimeout(() => toast("Some saved data couldn't be read, so it was set aside. Sync from your PC to get it back."), 500);
+  }
   saved = clone(data);
+  undoSnap = null;
+}
+function loadPlain() {
+  let raw = null, sync = null;
+  try { raw = JSON.parse(localStorage.getItem(KEY)); } catch { raw = localStorage.getItem(KEY); }
+  try { sync = JSON.parse(localStorage.getItem(SYNC_KEY) || "null"); } catch { sync = null; }
+  adopt(raw);
+  setSyncKey(sync);
+}
+/** After unlocking: open the encrypted store with the data key. */
+async function loadVault() {
+  vaultKey = await C.aesKey(dek);
+  const text = await L.readVault(vaultKey);
+  const box = text ? JSON.parse(text) : {};
+  adopt(box.data ?? null);
+  setSyncKey(box.sync ?? null);
+  localStorage.removeItem(KEY); // leftovers from turning the lock on mid-way
+  localStorage.removeItem(SYNC_KEY);
+}
+function setSyncKey(stored) {
+  syncStored = stored && stored.raw && stored.salt ? stored : null;
+  syncFileKey = null;
+  if (syncStored) C.loadFileKey(syncStored).then((k) => { if (syncStored?.raw === k.raw) syncFileKey = k; }).catch(() => {});
+}
+async function currentSyncKey() {
+  if (!syncStored) return null;
+  if (!syncFileKey) syncFileKey = await C.loadFileKey(syncStored);
+  return syncFileKey;
 }
 function persist() {
-  try { localStorage.setItem(KEY, JSON.stringify(data)); localStorage.setItem(META, JSON.stringify(meta)); }
-  catch (e) { toast("Couldn't save on this phone: " + e.message); }
+  try { localStorage.setItem(META, JSON.stringify(meta)); } catch { /* reported below if the data can't be saved either */ }
+  if (!data) return; // locked: nothing in memory to save
+  if (encrypted()) {
+    if (!vaultKey) return;
+    const key = vaultKey, text = JSON.stringify({ data, sync: syncStored });
+    saving = saving.then(() => L.writeVault(key, text)).catch((e) => toast("Couldn't save on this phone: " + e.message));
+    return;
+  }
+  try {
+    localStorage.setItem(KEY, JSON.stringify(data));
+    if (syncStored) localStorage.setItem(SYNC_KEY, JSON.stringify(syncStored)); else localStorage.removeItem(SYNC_KEY);
+  } catch (e) { toast("Couldn't save on this phone: " + e.message); }
+}
+/** Forget everything decrypted (on lock). */
+function forgetSecrets() {
+  if (dek) dek.fill(0);
+  dek = vaultKey = null;
+  data = saved = undoSnap = plan = fc = null;
+  syncStored = syncFileKey = null;
 }
 let undoSnap = null;
 function save(msg, undoable = false) {
@@ -61,12 +130,12 @@ const build = (extra = [], debtExtras = true, source = null, end = null) =>
 // ------------------------------------------------------------------ format
 function money(c, signed = false) {
   if (c === null || c === undefined) return "—";
-  const body = (data.settings.currency_symbol || "$") +
+  const body = esc(data.settings.currency_symbol || "$") +
     (Math.abs(c) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   return c < 0 ? "−" + body : signed && c > 0 ? "+" + body : body;
 }
 function moneyShort(c) {
-  const sym = data.settings.currency_symbol || "$";
+  const sym = esc(data.settings.currency_symbol || "$");
   const v = Math.abs(c / 100), sign = c < 0 ? "−" : "";
   if (v >= 10000) return `${sign}${sym}${Math.round(v / 1000)}k`;
   if (v >= 1000) return `${sign}${sym}${(v / 1000).toFixed(1).replace(/\.0$/, "")}k`;
@@ -463,7 +532,8 @@ function viewMore() {
     <div class="row tap" data-act="export"><div class="badge">⇪</div><div class="main"><div class="title">Export a backup</div></div></div>
     <div class="row tap" data-act="import"><div class="badge">⇩</div><div class="main"><div class="title">Import a backup</div></div></div>
     <div class="row tap" data-act="csv"><div class="badge">▦</div><div class="main"><div class="title">Export day-by-day (CSV)</div><div class="sub">Opens in Numbers or Excel</div></div></div>
-  </div><p class="hint">Your data is stored only on this phone (and in your iCloud Drive when you sync). Balance Tracker never sends it anywhere else.</p>`;
+  </div><p class="hint">Your data is stored only on this phone (and in your iCloud Drive when you sync). Balance Tracker never sends it anywhere else.
+    ${L.enabled() ? "🔒 It's encrypted on this phone by your app lock." : "Turn on the app lock in Settings to encrypt it on this phone."}</p>`;
   return html;
 }
 
@@ -471,6 +541,7 @@ function viewMore() {
 const sheet = () => $("#sheet");
 function openSheet(title, body, onMount, kind = "") {
   const s = sheet();
+  if (asking) { const a = asking; asking = null; a(null); } // a prompt was replaced by something else
   s.dataset.kind = kind;
   s.innerHTML = `<div class="grab"></div><header><h3>${esc(title)}</h3><button class="x" data-act="close" aria-label="Close">✕</button></header><div class="body">${body}</div>`;
   if (!s.open) s.showModal();
@@ -499,7 +570,7 @@ function sheetCheckin(draft = null) {
   const start = E.startCheckpoint(data);
   if (!start) return sheetStart();
   const body = `<p class="hint" style="padding-top:0">What does your bank app show right now? Any difference from the plan is logged as unplanned spending (or income).</p>
-    <div class="form">${field("Date", `<input type="date" id="ci_date" value="${E.toISO(today)}" min="${start.date}" max="${E.toISO(today)}">`)}
+    <div class="form">${field("Date", `<input type="date" id="ci_date" value="${E.toISO(today)}" min="${esc(start.date)}" max="${E.toISO(today)}">`)}
     ${field("Actual balance", `<input id="ci_bal" inputmode="decimal" placeholder="0.00">`)}
     <div id="ci_inc_row">${toggle("Today's scheduled items already landed", "ci_inc", true)}</div>
     ${field("Note", `<input id="ci_note" placeholder="Optional — groceries, gas…" style="text-align:left">`)}</div>
@@ -572,15 +643,15 @@ function sheetItem(id = null, kind = "bill") {
   const cards = data.debts.filter((d) => d.kind !== "loan");
   const cats = [...new Set(data.items.map((x) => x.category).filter(Boolean))].sort();
   const body = `<div class="seg" style="margin-bottom:14px"><button class="${i.kind === "income" ? "on" : ""}" data-act="itkind" data-k="income">Income</button><button class="${i.kind === "bill" ? "on" : ""}" data-act="itkind" data-k="bill">Bill / expense</button></div>
-    <input type="hidden" id="it_kind" value="${i.kind}">
+    <input type="hidden" id="it_kind" value="${esc(i.kind)}">
     <div class="form">${field("Name", `<input id="it_name" value="${esc(i.name)}" placeholder="Paycheque, Rent…">`)}
     ${field("Amount", `<input id="it_amt" inputmode="decimal" placeholder="0.00" value="${moneyInput(i.amount)}">`)}
     ${cards.length ? field("Paid with", `<select id="it_card"><option value="">Chequing</option>${cards.map((c) => `<option value="${esc(c.id)}" ${i.paid_with === c.id ? "selected" : ""}>💳 ${esc(c.name)}</option>`).join("")}</select>`, "it-billonly") : ""}
     ${field("How often", `<select id="it_freq">${opts(E.FREQUENCIES, i.frequency)}</select>`)}
-    ${field("First / next date", `<input type="date" id="it_start" value="${i.start_date}">`)}
+    ${field("First / next date", `<input type="date" id="it_start" value="${esc(i.start_date)}">`)}
     ${field("Second day", `<select id="it_second">${Array.from({ length: 31 }, (_, k) => `<option value="${k + 1}" ${i.second_day === k + 1 ? "selected" : ""}>${k + 1 === 31 ? "Last day" : ordinal(k + 1)}</option>`).join("")}</select>`, "it-semi")}
     ${toggle("Stops on a date", "it_hasend", !!i.end_date)}
-    ${field("Ends", `<input type="date" id="it_end" value="${i.end_date || E.toISO(today + 365)}">`, "it-end")}
+    ${field("Ends", `<input type="date" id="it_end" value="${esc(i.end_date || E.toISO(today + 365))}">`, "it-end")}
     ${field("On weekends", `<select id="it_wk">${opts(E.WEEKEND_RULES, i.weekend_rule)}</select>`)}
     ${field("Category", `<input id="it_cat" list="cats" value="${esc(i.category)}" placeholder="Optional"><datalist id="cats">${cats.map((c) => `<option value="${esc(c)}">`).join("")}</datalist>`)}
     ${toggle("Include in forecast", "it_active", i.active)}
@@ -633,7 +704,7 @@ function sheetChangeFrom(id, whenISO = null) {
   const when = whenISO || (nxt ? E.toISO(nxt.scheduled) : E.toISO(today));
   openSheet(`Change “${item.name}”`, `<p class="hint" style="padding-top:0">For a ${item.kind === "income" ? "pay" : "bill"} that changes from a certain date — a rent increase, a new phone plan, a raise. Earlier dates keep ${money(item.amount)} and the schedule stays the same.</p>
     <div class="form">${field("New amount", `<input id="cf_amt" inputmode="decimal" placeholder="0.00" value="${moneyInput(item.amount)}">`)}
-    ${field("Starting", `<input type="date" id="cf_date" value="${when}" min="${item.start_date}">`)}</div>
+    ${field("Starting", `<input type="date" id="cf_date" value="${esc(when)}" min="${esc(item.start_date)}">`)}</div>
     <div class="hint" id="cf_preview"></div>
     <button class="btn primary block" data-act="savechangefrom" data-id="${esc(id)}">Change amount</button>`, (s) => {
     const upd = () => {
@@ -666,11 +737,11 @@ function sheetDebt(id = null) {
   const body = `<div class="form">${field("Type", `<select id="db_kind">${opts(E.DEBT_KINDS, d.kind)}</select>`)}
     ${field("Name", `<input id="db_name" value="${esc(d.name)}" placeholder="Visa, Line of credit…">`)}
     ${field("Balance owed", `<input id="db_bal" inputmode="decimal" placeholder="0.00" value="${moneyInput(d.balance)}">`)}
-    ${field("Interest (APR %)", `<input id="db_apr" inputmode="decimal" placeholder="19.99" value="${d.apr || ""}">`)}
+    ${field("Interest (APR %)", `<input id="db_apr" inputmode="decimal" placeholder="19.99" value="${esc(d.apr || "")}">`)}
     ${field("Credit limit", `<input id="db_limit" inputmode="decimal" placeholder="Optional" value="${moneyInput(d.credit_limit)}">`)}
     ${field("Due day", `<select id="db_due">${Array.from({ length: 31 }, (_, k) => `<option value="${k + 1}" ${d.due_day === k + 1 ? "selected" : ""}>${k + 1 === 31 ? "Last day" : ordinal(k + 1)}</option>`).join("")}</select>`)}
     ${field("Minimum $", `<input id="db_minamt" inputmode="decimal" value="${moneyInput(d.min_amount)}" placeholder="0.00">`)}
-    ${field("or % of balance", `<input id="db_minpct" inputmode="decimal" value="${d.min_percent || ""}" placeholder="0">`)}
+    ${field("or % of balance", `<input id="db_minpct" inputmode="decimal" value="${esc(d.min_percent || "")}" placeholder="0">`)}
     ${toggle("Plus that month's interest", "db_plus", d.min_plus_interest)}
     ${field("Already a bill?", `<select id="db_link"><option value="">No</option>${bills.map((b) => `<option value="${esc(b.id)}" ${d.linked_bill_id === b.id ? "selected" : ""}>${esc(b.name)}</option>`).join("")}</select>`)}
     <div class="field stack"><label>Notes</label><textarea id="db_notes" placeholder="Optional">${esc(d.notes)}</textarea></div></div>
@@ -773,7 +844,7 @@ function sheetSettings() {
   openSheet("Settings", `<div class="form">${field("Account name", `<input id="se_name" value="${esc(s.account_name)}">`)}
     ${field("Low-balance cushion", `<input id="se_cushion" inputmode="decimal" value="${moneyInput(s.low_balance_threshold)}">`)}
     ${field("Watch ahead", `<select id="se_months">${[...new Set([1, 2, 3, 6, 9, 12, 18, 24, 36, s.forecast_months])].sort((a, b) => a - b)
-      .map((m) => `<option value="${m}" ${s.forecast_months === m ? "selected" : ""}>${m} month${m === 1 ? "" : "s"}</option>`).join("")}</select>`)}
+      .map((m) => `<option value="${esc(m)}" ${s.forecast_months === m ? "selected" : ""}>${esc(m)} month${m === 1 ? "" : "s"}</option>`).join("")}</select>`)}
     ${field("Currency symbol", `<input id="se_cur" value="${esc(s.currency_symbol)}" maxlength="4">`)}
     ${field("Appearance", `<select id="se_theme">${opts({ system: "Match iPhone", light: "Light", dark: "Dark" }, theme)}</select>`)}
     ${toggle("Ask for my balance when I open the app", "se_prompt", localStorage.getItem("bt-prompt") !== "0")}</div>
@@ -792,26 +863,90 @@ function sheetSync() {
     <div class="card"><h2>2 · Send your changes to your PC</h2>
       <p class="muted small" style="margin-top:0">Tap below, choose <b>Save to Files</b> → <b>iCloud Drive → Balance Tracker</b> → <b>Save</b>, and tap <b>Replace</b> if asked. Your PC picks it up automatically.</p>
       <button class="btn block ${meta.unsent ? "primary" : ""}" data-act="pushsync">Send to PC</button></div>
+    ${syncStored ? `<div class="banner info">🔒 Your sync file is encrypted with the passphrase from your PC. It's remembered on this phone${L.enabled() ? " (inside the encrypted lock)" : " — turn on the app lock to protect it"}.
+      <button class="linkbtn" data-act="forgetsync">Forget it</button></div>`
+      : `<p class="hint">Tip: set a sync passphrase on your PC (Settings → iPhone sync) so the file in iCloud Drive is encrypted.</p>`}
     <p class="hint">${meta.lastSync ? "Last synced " + new Date(meta.lastSync).toLocaleString() + ". " : ""}Edits on both devices are merged — the newest change to each item wins, so nothing is lost if you sync in either order.</p>
     <details class="hint"><summary>First time setup</summary><ol class="steps">
       <li>On your PC, install <b>iCloud for Windows</b> (Microsoft Store), sign in with your Apple ID and turn on <b>iCloud Drive</b>.</li>
-      <li>In Balance Tracker on the PC: <b>Settings → iPhone sync → Turn on iPhone sync</b>.</li>
-      <li>Here, tap <b>Choose sync file</b>. Done!</li></ol></details>`;
+      <li>In Balance Tracker on the PC: <b>Settings → iPhone sync → Turn on iPhone sync</b>, and set a passphrase.</li>
+      <li>Here, tap <b>Choose sync file</b> and enter the passphrase. Done!</li></ol></details>`;
   openSheet("Sync with your PC", body);
 }
+const MAX_FILE_BYTES = 10 * 1024 * 1024; // years of data is well under 1 MB
 function pickFile() {
   return new Promise((resolve) => {
     const inp = $("#filepick");
     inp.value = "";
-    inp.onchange = async () => { const f = inp.files[0]; resolve(f ? await f.text() : null); };
+    inp.onchange = async () => {
+      const f = inp.files[0];
+      if (f && f.size > MAX_FILE_BYTES) { toast("That file is too big to be a Balance Tracker file."); resolve(null); return; }
+      resolve(f ? await f.text() : null);
+    };
     inp.click();
   });
 }
+
+// A password/passphrase prompt in the sheet. Resolves to the text, or null if the sheet is closed.
+let asking = null;
+function askSecret(title, message, problem = "", label = "Passphrase") {
+  return new Promise((resolve) => { // openSheet() cancels any earlier prompt
+    openSheet(title, `<p class="hint" style="padding-top:0">${esc(message)}</p>
+      ${problem ? `<div class="banner warning">${esc(problem)}</div>` : ""}
+      <div class="form">${field(esc(label), `<input id="ask_pw" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" style="text-align:left">`)}</div>
+      <button class="btn primary block" data-act="asksubmit">Continue</button>`, (s) => setTimeout(() => $("#ask_pw", s)?.focus(), 80), "ask");
+    asking = resolve;
+  });
+}
+function submitAsk() {
+  if (!asking) return;
+  const value = val("ask_pw");
+  if (!value) return;
+  const done = asking;
+  asking = null;
+  const btn = $('[data-act="asksubmit"]', sheet());
+  if (btn) { btn.disabled = true; btn.textContent = "Checking…"; }
+  done(value);
+}
+sheet().addEventListener("close", () => { if (asking) { const a = asking; asking = null; a(null); } });
+
+/** Open an encrypted file: with the remembered sync key if it fits, otherwise by asking. */
+async function openEncrypted(env, title, message, label) {
+  const known = await currentSyncKey().catch(() => null);
+  if (known && C.keyFits(env, known)) {
+    try { return { text: await C.openWithKey(env, known), fileKey: known }; } catch { /* ask instead */ }
+  }
+  let problem = "";
+  for (;;) {
+    const pass = await askSecret(title, message, problem, label);
+    if (pass === null || locked) return null;
+    try { return await C.openWithPassphrase(env, pass); }
+    catch (e) {
+      if (e.name !== "WrongPassword") { closeSheet(); toast(e.message); return null; }
+      problem = "That didn't work — check it and try again.";
+    }
+  }
+}
+
 async function pullSync() {
   const text = await pickFile();
-  if (text === null) return;
+  if (text === null || locked) return;
+  let raw;
+  try { raw = JSON.parse(text); } catch { toast("That isn't a Balance Tracker file."); return; }
+  let key = syncStored;
+  if (C.isEnvelope(raw)) {
+    if (raw.kind !== "sync") { toast("That's a protected backup — use More → Import a backup."); return; }
+    const opened = await openEncrypted(raw, "Sync passphrase", "Your PC encrypts the sync file. Enter the passphrase you set there (Settings → iPhone sync).");
+    if (!opened || locked) return;
+    raw = JSON.parse(opened.text);
+    key = C.storableKey(opened.fileKey);
+  } else if (syncStored) {
+    if (!confirm("This sync file isn't encrypted, but your sync was. If you turned encryption off on your PC, tap OK to stop encrypting here too.")) return;
+    key = null;
+  }
   let remote;
-  try { remote = E.normData(JSON.parse(text)); } catch (e) { toast("That isn't a Balance Tracker file."); return; }
+  try { remote = E.normData(raw); } catch (e) { closeSheet(); toast("That isn't a Balance Tracker file: " + e.message); return; }
+  setSyncKey(key);
   const merged = E.merge(data, remote);
   const changed = !E.sameData(merged, data);
   data = merged;
@@ -824,7 +959,9 @@ async function pullSync() {
   toast(changed ? "Updated from your PC ✓" : "Already up to date ✓");
 }
 async function pushSync() {
-  const payload = JSON.stringify({ ...data, saved_at: new Date().toISOString(), device: "phone" }, null, 1);
+  const json = JSON.stringify({ ...data, saved_at: new Date().toISOString(), device: "phone" }, null, 1);
+  const key = await currentSyncKey();
+  const payload = key ? await C.seal(json, key, "sync") : json;
   const file = new File([payload], SYNC_NAME, { type: "application/json" });
   try {
     if (navigator.canShare && navigator.canShare({ files: [file] })) await navigator.share({ files: [file] });
@@ -832,12 +969,62 @@ async function pushSync() {
     meta.unsent = false;
     meta.lastSync = Date.now();
     persist();
+    if (locked) return; // it locked while the share sheet was up
     render();
     if (sheet().open) sheetSync();
     toast("Sent — your PC will merge it in a moment");
   } catch (e) {
-    if (e.name !== "AbortError") toast("Couldn't share: " + e.message);
+    // iOS only allows sharing right after a tap; if encrypting took too long, the next tap is instant
+    if (e.name === "NotAllowedError") toast("Tap Send to PC again to share the file");
+    else if (e.name !== "AbortError") toast("Couldn't share: " + e.message);
   }
+}
+
+// ---------- backups
+let readyBackup = null;
+function sheetExport() {
+  readyBackup = null;
+  openSheet("Export a backup", `<p class="hint" style="padding-top:0">A backup holds all your balances, bills and debts. Add a password so it's safe to keep in email or cloud storage — you'll need it to restore.</p>
+    <div class="form">${field("Password", `<input id="bk_p1" type="password" autocomplete="new-password" autocapitalize="off" placeholder="Optional" style="text-align:left">`)}
+    ${field("Confirm", `<input id="bk_p2" type="password" autocomplete="new-password" autocapitalize="off" style="text-align:left">`)}</div>
+    <p class="hint">Leave both blank for an unprotected backup.</p>
+    <button class="btn primary block" data-act="makebackup">Create backup</button>`);
+}
+async function makeBackup() {
+  const p1 = val("bk_p1"), p2 = val("bk_p2");
+  if (p1 || p2) {
+    if (p1.length < 10) { toast("Use at least 10 characters for the password"); return; }
+    if (p1 !== p2) { toast("The passwords don't match"); return; }
+  }
+  const btn = $('[data-act="makebackup"]', sheet());
+  if (btn) { btn.disabled = true; btn.textContent = "Encrypting…"; }
+  const json = JSON.stringify(data, null, 1);
+  const text = p1 ? await C.seal(json, await C.newFileKey(p1), "backup") : json;
+  if (locked) return;
+  readyBackup = new File([text], `BalanceTracker-backup-${E.toISO(today)}.json`, { type: "application/json" });
+  // Sharing needs a fresh tap (iOS only allows it right after one), so offer a button
+  openSheet("Backup ready", `<p class="hint" style="padding-top:0">${p1 ? "🔒 Protected with your password. " : ""}Save it to Files, email it to yourself, or AirDrop it.</p>
+    <button class="btn primary block" data-act="backupshare">Save or share…</button>`);
+}
+async function importBackup() {
+  const text = await pickFile();
+  if (text === null || locked) return;
+  let raw;
+  try { raw = JSON.parse(text); } catch { toast("That isn't a Balance Tracker backup."); return; }
+  if (C.isEnvelope(raw)) {
+    const opened = await openEncrypted(raw, "Protected backup", raw.kind === "sync"
+      ? "This is an encrypted sync file. Enter the sync passphrase from your PC." : "Enter the password this backup was protected with.",
+    raw.kind === "sync" ? "Passphrase" : "Password");
+    if (!opened || locked) return;
+    closeSheet();
+    raw = JSON.parse(opened.text);
+  }
+  let incoming;
+  try { incoming = E.normData(raw); } catch (e) { toast("That isn't a Balance Tracker backup: " + e.message); return; }
+  if (!confirm(`Replace everything on this phone with this backup (${incoming.items.length} entries)?`)) return;
+  undoSnap = clone(saved);
+  data = incoming;
+  save("Backup restored", true);
 }
 function download(file) {
   const a = document.createElement("a");
@@ -943,67 +1130,175 @@ function renderLock() {
     checkinDraft = { date: val("ci_date"), bal: val("ci_bal"), inc: checked("ci_inc"), note: val("ci_note") };
   }
   closeSheet();
+  $("#toast").classList.remove("show");
   $("#tabs").classList.add("hidden");
   const wait = L.waitSeconds();
+  const upgrade = L.legacy();
+  const face = L.faceIdOn() && !upgrade;
   $("#app").innerHTML = `<div class="lock"><img src="icons/icon-192.png" width="76" height="76" alt="">
     <h1>Balance Tracker</h1><p class="muted">Locked</p>
-    ${L.faceIdOn() ? `<button class="btn primary block" data-act="faceid">Unlock with Face ID</button><div class="or">or enter your passcode</div>` : ""}
-    <input id="lk_pin" type="password" inputmode="numeric" autocomplete="off" maxlength="12" placeholder="Passcode" ${wait ? "disabled" : ""}>
-    <button class="btn block ${L.faceIdOn() ? "" : "primary"}" data-act="pinunlock" ${wait ? "disabled" : ""}>Unlock</button>
+    ${upgrade ? `<p class="small">Security upgrade: enter your passcode once to encrypt your data on this phone.</p>` : ""}
+    ${face ? `<button class="btn primary block" data-act="faceid">Unlock with Face ID</button><div class="or">or enter your passcode</div>` : ""}
+    <input id="lk_pin" type="password" ${L.numericPasscode() ? 'inputmode="numeric"' : ""} autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="64" placeholder="Passcode" ${wait ? "disabled" : ""}>
+    <button class="btn block ${face ? "" : "primary"}" data-act="pinunlock" ${wait ? "disabled" : ""}>Unlock</button>
     <p class="small neg" id="lk_msg">${wait ? `Too many tries — wait ${wait}s` : ""}</p>
     <button class="linkbtn" data-act="forgot">Forgot passcode?</button></div>`;
   if (wait) setTimeout(() => locked && renderLock(), 1000);
 }
+/** Lock now: forget the key and everything decrypted, and show the lock screen. */
+function lockNow() {
+  if (!L.enabled() || locked) return;
+  locked = true;
+  render(); // the lock screen: closes sheets (keeping a half-typed check-in) before the data goes
+  forgetSecrets();
+}
+let unlocking = false;
 async function tryFaceId(auto = false) {
-  if (!L.faceIdOn()) return;
+  if (!L.faceIdOn() || L.legacy() || unlocking) return;
+  unlocking = true;
   try {
-    if (await L.verifyFaceId()) unlock();
+    const r = await L.unlockWithFaceId();
+    if (r?.dek && locked) { dek = r.dek; await loadVault(); unlock(); }
   } catch (e) {
     // iPhone may refuse an automatic prompt until the screen is tapped — the button handles that
     if (!auto && e.name !== "NotAllowedError") toast("Face ID: " + e.message);
-  }
+  } finally { unlocking = false; }
 }
 async function pinUnlock() {
   const pin = $("#lk_pin")?.value || "";
-  if (!pin) return;
-  if (await L.checkPin(pin)) { unlock(); return; }
-  renderLock();
-  if (!L.waitSeconds()) $("#lk_msg").textContent = "Wrong passcode";
+  if (!pin || unlocking) return;
+  unlocking = true;
+  $("#lk_msg").textContent = "Checking…";
+  try {
+    const r = await L.unlockWithPin(pin);
+    if (r.wiped) {
+      eraseAll();
+      toast(`${L.WIPE_AFTER} wrong passcodes: Balance Tracker's data on this phone was erased. Sync from your PC to get it back.`);
+      return;
+    }
+    if (r.wrong) {
+      renderLock();
+      if (!L.waitSeconds()) $("#lk_msg").textContent = "Wrong passcode";
+      return;
+    }
+    if (r.legacy) { // the first unlock since 2.1: encrypt what 2.0 stored in the clear
+      loadPlain();
+      const hadFaceId = !!L.cfg()?.credId;
+      dek = C.randomBytes(32);
+      vaultKey = await C.aesKey(dek);
+      await L.writeVault(vaultKey, JSON.stringify({ data, sync: syncStored }));
+      await L.setPasscode(pin, /^\d+$/.test(pin), dek);
+      localStorage.removeItem(KEY);
+      localStorage.removeItem(SYNC_KEY);
+      unlock();
+      toast(hadFaceId ? "🔒 Your data on this phone is now encrypted. Turn Face ID back on in Settings → Face ID & passcode."
+        : "🔒 Your data on this phone is now encrypted");
+      return;
+    }
+    dek = r.dek;
+    await loadVault();
+    unlock();
+  } catch (e) {
+    toast("Couldn't unlock: " + e.message);
+    if (locked) renderLock();
+  } finally { unlocking = false; }
 }
 function unlock() {
   locked = false;
   hiddenAt = null;
+  lastInput = Date.now();
   refresh();
   if (checkinDraft) { const d = checkinDraft; checkinDraft = null; setTimeout(() => sheetCheckin(d), 250); }
   else startupPrompt();
 }
+/** Erase everything Balance Tracker keeps on this phone (the PC and iCloud copies are untouched). */
+function eraseAll() {
+  L.disable();
+  for (const k of [KEY, SYNC_KEY, META, DAMAGED]) localStorage.removeItem(k);
+  forgetSecrets();
+  loadMeta();
+  loadPlain();
+  locked = false;
+  tab = "home";
+  closeSheet();
+  refresh();
+}
+
+const passcodeFields = (numeric, withCurrent) => `<div class="form">
+  ${withCurrent ? field("Current passcode", `<input id="sc_cur" type="password" ${L.numericPasscode() ? 'inputmode="numeric"' : ""} autocomplete="off" maxlength="64">`) : ""}
+  ${field("New passcode", `<input id="sc_p1" class="pc" type="password" ${numeric ? 'inputmode="numeric"' : ""} autocomplete="off" autocapitalize="off" maxlength="64" placeholder="${numeric ? `${L.MIN_PASSCODE}+ digits` : `${L.MIN_PASSCODE}+ characters`}">`)}
+  ${field("Confirm", `<input id="sc_p2" class="pc" type="password" ${numeric ? 'inputmode="numeric"' : ""} autocomplete="off" autocapitalize="off" maxlength="64">`)}
+  ${toggle("Use letters and numbers", "sc_alpha", !numeric)}</div>`;
 
 function sheetSecurity() {
   if (!L.enabled()) {
     openSheet("Face ID & passcode", `<p class="hint" style="padding-top:0">Lock Balance Tracker so nobody else using your phone can see your finances.
-      First choose a passcode (your backup if Face ID doesn't work), then turn on Face ID.</p>
-      <div class="form">${field("New passcode", `<input id="sc_p1" type="password" inputmode="numeric" maxlength="12" placeholder="4–12 digits">`)}
-      ${field("Confirm", `<input id="sc_p2" type="password" inputmode="numeric" maxlength="12">`)}</div>
-      <button class="btn primary block" data-act="savepin">Continue</button>`);
+      Everything it keeps on this phone is then encrypted with a key only your passcode (or Face ID) can unlock.
+      First choose a passcode — your backup if Face ID doesn't work — then turn on Face ID.</p>
+      ${passcodeFields(true, false)}
+      <p class="hint">A longer passcode, or one with letters, is much harder to crack.</p>
+      <button class="btn primary block" data-act="savepin">Turn on the lock</button>`);
     return;
   }
   L.faceIdAvailable().then((avail) => {
+    if (locked) return;
     openSheet("Face ID & passcode", `<div class="list">
       ${L.faceIdOn() ? `<div class="row"><div class="badge in">✓</div><div class="main"><div class="title">Face ID is on</div><div class="sub">Passcode works as a backup</div></div></div>`
-        : avail ? `<div class="row tap" data-act="enablefaceid"><div class="badge ci">☺</div><div class="main"><div class="title accent">Turn on Face ID</div><div class="sub">Your iPhone will ask to save a passkey</div></div></div>`
+        : avail ? `<div class="row tap" data-act="enablefaceid"><div class="badge ci">☺</div><div class="main"><div class="title accent">Turn on Face ID</div><div class="sub">Your iPhone will ask to save a passkey, then for Face ID once more</div></div></div>`
         : `<div class="row"><div class="main"><div class="title">Face ID isn't available</div><div class="sub">Open the app from your Home Screen icon and make sure Face ID is set up in iPhone Settings.</div></div></div>`}
       </div>
       <div class="form">${field("Lock", `<select id="sc_after" data-change="lockafter">${[[0, "Every time I leave"], [1, "After 1 minute"], [5, "After 5 minutes"], [15, "After 15 minutes"]]
-        .map(([m, t]) => `<option value="${m}" ${L.lockAfterMinutes() === m ? "selected" : ""}>${t}</option>`).join("")}</select>`)}</div>
+        .map(([m, t]) => `<option value="${m}" ${L.lockAfterMinutes() === m ? "selected" : ""}>${t}</option>`).join("")}</select>`)}
+      <div class="field toggle-row"><label for="sc_wipe">Erase data after ${L.WIPE_AFTER} wrong passcodes</label><label class="switch"><input type="checkbox" id="sc_wipe" data-change="wipe" ${L.wipeOn() ? "checked" : ""}><span></span></label></div></div>
+      <p class="hint">It also locks after ${idleMinutes()} minutes without a tap. Erasing only affects this phone — your PC and the iCloud sync file keep everything.</p>
       <div class="dayhead"><span>Change passcode</span></div>
-      <div class="form">${field("New passcode", `<input id="sc_p1" type="password" inputmode="numeric" maxlength="12" placeholder="4–12 digits">`)}
-      ${field("Confirm", `<input id="sc_p2" type="password" inputmode="numeric" maxlength="12">`)}</div>
+      ${passcodeFields(L.numericPasscode(), true)}
       <button class="btn block" data-act="savepin">Change passcode</button>
       ${L.faceIdOn() ? `<button class="btn block" style="margin-top:10px" data-act="disablefaceid">Turn off Face ID (keep passcode)</button>` : ""}
       <div class="dayhead" style="margin-top:12px"><span>Turn off the lock</span></div>
-      <div class="form">${field("Current passcode", `<input id="sc_cur" type="password" inputmode="numeric" maxlength="12">`)}</div>
+      <div class="form">${field("Current passcode", `<input id="sc_off" type="password" ${L.numericPasscode() ? 'inputmode="numeric"' : ""} autocomplete="off" maxlength="64">`)}</div>
+      <p class="hint">Turning it off also stores your data on this phone unencrypted.</p>
       <button class="btn danger block" data-act="disablelock">Turn off app lock</button>`);
   });
+}
+/** Check the passcode typed into `id` while unlocked. Shows why not and returns false if it's wrong. */
+async function confirmPasscode(id) {
+  const r = await L.unlockWithPin(val(id));
+  if (r.wiped) { eraseAll(); toast("Too many wrong passcodes — data on this phone was erased."); return false; }
+  if (r.wrong) { toast(L.waitSeconds() ? "Too many tries — wait a moment" : "Wrong passcode"); return false; }
+  return true;
+}
+async function savePasscode() {
+  const numeric = !checked("sc_alpha");
+  const p1 = val("sc_p1"), p2 = val("sc_p2");
+  const problem = L.passcodeProblem(p1, numeric);
+  if (problem) { toast(problem); return; }
+  if (p1 !== p2) { toast("The passcodes don't match"); return; }
+  if (!L.enabled()) { // turn the lock on: encrypt everything, then remove the unencrypted copy
+    const key = C.randomBytes(32);
+    const vk = await C.aesKey(key);
+    await L.writeVault(vk, JSON.stringify({ data, sync: syncStored }));
+    await L.setPasscode(p1, numeric, key);
+    dek = key; vaultKey = vk;
+    localStorage.removeItem(KEY);
+    localStorage.removeItem(SYNC_KEY);
+    toast("🔒 Lock on — your data on this phone is encrypted. Now turn on Face ID.");
+  } else {
+    if (!(await confirmPasscode("sc_cur")) || !dek) return;
+    await L.setPasscode(p1, numeric, dek.slice());
+    toast("Passcode changed");
+  }
+  sheetSecurity();
+}
+async function disableLock() {
+  if (!(await confirmPasscode("sc_off"))) return;
+  await saving; // let the last encrypted write finish first
+  L.disable();
+  if (dek) dek.fill(0);
+  dek = vaultKey = null;
+  persist(); // now stored unencrypted
+  closeSheet();
+  toast("App lock turned off");
 }
 
 // ------------------------------------------------------------------ events
@@ -1032,28 +1327,24 @@ document.addEventListener("click", async (ev) => {
     case "pinunlock": await pinUnlock(); break;
     case "forgot": {
       if (!confirm("Forgot your passcode? This erases Balance Tracker's data on this phone only — your PC and the iCloud sync file are untouched, so you can sync everything back right after. Continue?")) break;
-      L.disable(); localStorage.removeItem(KEY); localStorage.removeItem(META);
-      load(); locked = false; tab = "home"; refresh(); break;
+      eraseAll(); break;
     }
     case "security": sheetSecurity(); break;
-    case "savepin": {
-      const p1 = val("sc_p1"), p2 = val("sc_p2");
-      if (!/^\d{4,12}$/.test(p1)) { toast("Use 4 to 12 digits"); break; }
-      if (p1 !== p2) { toast("The passcodes don't match"); break; }
-      const first = !L.enabled();
-      await L.setPin(p1);
-      toast(first ? "Passcode set — now turn on Face ID" : "Passcode changed");
-      sheetSecurity(); break;
-    }
+    case "savepin": await savePasscode(); break;
     case "enablefaceid": {
-      try { await L.registerFaceId(); toast("Face ID is on 🔒"); }
+      if (!dek) break;
+      try { await L.registerFaceId(dek.slice()); toast("Face ID is on 🔒"); }
       catch (e) { toast(e.name === "NotAllowedError" ? "Face ID setup was cancelled" : "Couldn't turn on Face ID: " + e.message); }
-      sheetSecurity(); break;
+      if (!locked) sheetSecurity();
+      break;
     }
     case "disablefaceid": L.forgetFaceId(); toast("Face ID off — passcode still required"); sheetSecurity(); break;
-    case "disablelock": {
-      if (!(await L.checkPin(val("sc_cur")))) { toast(L.waitSeconds() ? "Too many tries — wait a moment" : "Wrong passcode"); break; }
-      L.disable(); closeSheet(); toast("App lock turned off"); break;
+    case "disablelock": await disableLock(); break;
+    case "asksubmit": submitAsk(); break;
+    case "backupshare": if (readyBackup) { await shareFile(readyBackup); readyBackup = null; closeSheet(); } break;
+    case "forgetsync": {
+      if (!confirm("Forget the sync passphrase on this phone? You'll be asked for it the next time you choose the sync file.")) break;
+      setSyncKey(null); persist(); sheetSync(); break;
     }
     case "sync": sheetSync(); break;
     case "pullsync": await pullSync(); break;
@@ -1133,44 +1424,35 @@ document.addEventListener("click", async (ev) => {
       s.account_name = val("se_name").trim() || "Chequing";
       s.low_balance_threshold = parseMoney(val("se_cushion"));
       s.forecast_months = Number(val("se_months"));
-      s.currency_symbol = val("se_cur").trim() || "$";
+      s.currency_symbol = E.cleanSymbol(val("se_cur"));
       localStorage.setItem("bt-theme", val("se_theme"));
       localStorage.setItem("bt-prompt", checked("se_prompt") ? "1" : "0");
       applyTheme();
       closeSheet(); save("Settings saved"); break;
     }
     case "reset": {
-      if (!confirm("Erase all Balance Tracker data on this phone? (Your PC and iCloud copy are not touched.)")) break;
-      localStorage.removeItem(KEY); localStorage.removeItem(META);
-      load(); closeSheet(); tab = "home"; refresh(); break;
+      if (!confirm("Erase all Balance Tracker data on this phone, and turn off the lock? (Your PC and iCloud copy are not touched.)")) break;
+      eraseAll(); break;
     }
-    case "export": {
-      const file = new File([JSON.stringify(data, null, 1)], `BalanceTracker-backup-${E.toISO(today)}.json`, { type: "application/json" });
-      try { if (navigator.canShare && navigator.canShare({ files: [file] })) await navigator.share({ files: [file] }); else download(file); }
-      catch (e) { if (e.name !== "AbortError") toast(e.message); }
-      break;
-    }
-    case "import": {
-      const text = await pickFile();
-      if (text === null) break;
-      try {
-        const incoming = E.normData(JSON.parse(text));
-        if (!confirm(`Replace everything on this phone with this backup (${incoming.items.length} entries)?`)) break;
-        undoSnap = clone(saved);
-        data = incoming;
-        save("Backup restored", true);
-      } catch { toast("That isn't a Balance Tracker backup."); }
-      break;
-    }
+    case "export": sheetExport(); break;
+    case "makebackup": await makeBackup(); break;
+    case "import": await importBackup(); break;
   }
 });
 document.addEventListener("keydown", (ev) => {
   if (ev.key === "Enter" && ev.target.id === "lk_pin") pinUnlock();
+  if (ev.key === "Enter" && ev.target.id === "ask_pw") submitAsk();
+});
+document.addEventListener("input", (ev) => {
+  if (ev.target.id === "sc_alpha") { // switch the passcode boxes between the number pad and the full keyboard
+    sheet().querySelectorAll("input.pc").forEach((el) => { if (ev.target.checked) el.removeAttribute("inputmode"); else el.setAttribute("inputmode", "numeric"); });
+  }
 });
 document.addEventListener("change", (ev) => {
   const t = ev.target.closest("[data-change]");
   if (!t) return;
   if (t.dataset.change === "lockafter") { L.setAfter(Number(t.value)); toast("Saved"); return; }
+  if (t.dataset.change === "wipe") { L.setWipe(t.checked); toast(t.checked ? `Data on this phone will be erased after ${L.WIPE_AFTER} wrong passcodes` : "Saved"); return; }
   const s = data.settings;
   if (t.dataset.change === "dmode") s.debt_mode = t.value;
   if (t.dataset.change === "dfixed") s.debt_fixed_extra = parseMoney(t.value);
@@ -1187,12 +1469,12 @@ function applyTheme() {
 }
 
 // ------------------------------------------------------------------ start
-load();
+loadMeta();
 applyTheme();
-recompute();
+if (!locked) { loadPlain(); recompute(); }
 render();
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && E.todayDay() !== today) refresh();
+  if (document.visibilityState === "visible" && !locked && E.todayDay() !== today) refresh();
 });
 function startupPrompt() {
   const lc = E.latestCheckpoint(data);
@@ -1208,12 +1490,17 @@ document.addEventListener("visibilitychange", () => {
   } else {
     document.body.classList.remove("cover");
     if (L.enabled() && !locked && hiddenAt !== null && (Date.now() - hiddenAt) / 60000 >= L.lockAfterMinutes()) {
-      locked = true;
-      render();
+      lockNow();
       tryFaceId(true);
     }
   }
 });
+// Also lock after a while without a tap, even with the app open on screen
+let lastInput = Date.now();
+const idleMinutes = () => Math.max(5, L.lockAfterMinutes());
+for (const type of ["pointerdown", "keydown", "touchstart"]) document.addEventListener(type, () => { lastInput = Date.now(); }, { capture: true, passive: true });
+setInterval(() => {
+  if (L.enabled() && !locked && Date.now() - lastInput >= idleMinutes() * 60000) lockNow();
+}, 15000);
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
-window.__bt = { get data() { return data; }, get locked() { return locked; }, E, L }; // for automated tests

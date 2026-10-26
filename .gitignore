@@ -6,3 +6,21 @@ venv/
 build/
 dist/
 *.spec
+
+# Personal data and secrets must never be committed (they live in %APPDATA%\BalanceTracker, but
+# BALANCE_TRACKER_HOME can point anywhere, including inside this folder)
+data.json
+secrets.json
+*.tmp
+backups/
+BalanceTracker-sync*.json
+BalanceTracker-backup*.json
+balance-forecast-*.csv
+BalanceTracker-reminders.ics
+*.log
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
